@@ -166,7 +166,11 @@ def _call_gemini(prompt: str, timeout: float = 30.0) -> dict[str, Any] | None:
 
 
 def fetch_external_reviews(hostname: str, timeout_ms: int = 5000) -> str:
-    """Fetch external review signals from Trustpilot and other sources."""
+    """Fetch external review signals from sources that are reasonably bot-tolerant.
+
+    Note: Sites like ScamAdviser frequently sit behind Cloudflare / human verification.
+    We intentionally do not scrape those pages because it produces unreliable results.
+    """
     timeout = timeout_ms / 1000
     reviews_text = []
 
@@ -201,32 +205,13 @@ def fetch_external_reviews(hostname: str, timeout_ms: int = 5000) -> str:
             elif res.status_code == 404:
                 reviews_text.append("Trustpilot: Not listed (no reviews)")
     except Exception:
-        reviews_text.append("Trustpilot: Could not check")
+        reviews_text.append("Trustpilot: Unavailable (blocked or network error)")
 
-    # Try ScamAdviser (just check if listed)
-    try:
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            res = client.get(
-                f"https://www.scamadviser.com/check-website/{hostname}",
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html",
-                },
-            )
-            if res.status_code == 200:
-                html = res.text[:20000]
-                # Look for trust score
-                score_match = re.search(r'trust\s*score[:\s]*(\d+)', html, re.IGNORECASE)
-                if score_match:
-                    reviews_text.append(f"ScamAdviser: Trust score {score_match.group(1)}/100")
-                elif "high risk" in html.lower() or "very low trust" in html.lower():
-                    reviews_text.append("ScamAdviser: Flagged as high risk")
-                elif "trust" in html.lower():
-                    reviews_text.append("ScamAdviser: Listed (check manually for details)")
-    except Exception:
-        pass
-
-    return "\n".join(reviews_text) if reviews_text else "No external reviews found"
+    return (
+        "\n".join(reviews_text)
+        if reviews_text
+        else "External reviews unavailable (many sources block automated checks)"
+    )
 
 
 def judge_website(

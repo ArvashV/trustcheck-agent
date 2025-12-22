@@ -665,7 +665,8 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         try:
             external_reviews_text = fetch_external_reviews(hostname, timeout_ms=5000)
         except Exception:
-            external_reviews_text = "Could not fetch external reviews"
+            external_reviews_text = None
+            warnings.append("External reviews: unavailable (blocked or network error)")
 
     # AI Judgment - PRIMARY scoring mechanism
     ai_judgment: AIJudgment | None = None
