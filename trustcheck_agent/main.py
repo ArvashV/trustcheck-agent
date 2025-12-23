@@ -11,8 +11,14 @@ from fastapi.responses import Response
 from dotenv import load_dotenv
 
 from .analyzer import analyze
-from .models import AnalyzeRequest, AnalyzeResponse, ScreenshotRequest
-from .screenshot import capture_screenshot
+from .models import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    ScreenshotRequest,
+    ScreenshotsRequest,
+    ScreenshotsResponse,
+)
+from .screenshot import capture_screenshot, capture_screenshot_timeline
 
 
 # Load environment variables from the repo root .env (so GEMINI_API_KEY works in local dev)
@@ -63,3 +69,17 @@ async def screenshot_endpoint(req: ScreenshotRequest):
         return Response(content=shot.data, media_type=shot.mime, headers={"cache-control": "no-store"})
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Screenshot failed: {e}")
+
+
+@app.post("/screenshots", response_model=ScreenshotsResponse)
+async def screenshots_endpoint(req: ScreenshotsRequest):
+    try:
+        shots = await capture_screenshot_timeline(
+            req.url,
+            delays_ms=req.delays_ms,
+            timeout_ms=req.timeout_ms,
+            full_page=req.full_page,
+        )
+        return {"shots": shots}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Screenshot timeline failed: {e}")

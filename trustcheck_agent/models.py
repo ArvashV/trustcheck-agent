@@ -104,3 +104,21 @@ class ScreenshotRequest(BaseModel):
     full_page: bool = Field(False)
     timeout_ms: int = Field(12000, ge=1000, le=30000)
 
+
+class ScreenshotsRequest(BaseModel):
+    url: str = Field(..., min_length=1)
+    # Capture timeline offsets after navigation (milliseconds)
+    delays_ms: list[int] = Field(default_factory=lambda: [1000, 3000, 5000])
+    full_page: bool = Field(False)
+    timeout_ms: int = Field(20000, ge=1000, le=60000)
+
+
+class ScreenshotTimelineItem(BaseModel):
+    at_ms: int
+    mime: str = "image/png"
+    data_base64: str
+
+
+class ScreenshotsResponse(BaseModel):
+    shots: list[ScreenshotTimelineItem]
+
