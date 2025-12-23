@@ -4,12 +4,15 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from dotenv import load_dotenv
 
 from .analyzer import analyze
-from .models import AnalyzeRequest, AnalyzeResponse
+from .models import AnalyzeRequest, AnalyzeResponse, ScreenshotRequest
+from .screenshot import capture_screenshot
 
 
 # Load environment variables from the repo root .env (so GEMINI_API_KEY works in local dev)
@@ -47,3 +50,16 @@ def healthz():
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze_endpoint(req: AnalyzeRequest):
     return analyze(req)
+
+
+@app.post("/screenshot")
+async def screenshot_endpoint(req: ScreenshotRequest):
+    try:
+        shot = await capture_screenshot(
+            req.url,
+            timeout_ms=req.timeout_ms,
+            full_page=req.full_page,
+        )
+        return Response(content=shot.data, media_type=shot.mime, headers={"cache-control": "no-store"})
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Screenshot failed: {e}")

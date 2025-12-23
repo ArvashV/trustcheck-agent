@@ -97,3 +97,10 @@ class AnalyzeResponse(BaseModel):
     analyzed_at: str
     timings_ms: dict[str, int]
     warnings: list[str] = []
+
+
+class ScreenshotRequest(BaseModel):
+    url: str = Field(..., min_length=1)
+    full_page: bool = Field(False)
+    timeout_ms: int = Field(12000, ge=1000, le=30000)
+
