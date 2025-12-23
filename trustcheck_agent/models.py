@@ -52,6 +52,7 @@ class CrawlPage(BaseModel):
     content_type: str | None = None
     html_snippet: str | None = None
     fetch_note: str | None = None
+    page_type: str | None = None
 
 
 class CrawlInfo(BaseModel):

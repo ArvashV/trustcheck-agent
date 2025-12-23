@@ -96,6 +96,116 @@ def _is_probably_asset_url(u: str) -> bool:
     )
 
 
+def _classify_page_type(u: str, homepage_url: str | None = None) -> str:
+    try:
+        p = urlparse(u)
+        path = (p.path or "/").lower()
+    except Exception:
+        return "unknown"
+
+    if homepage_url:
+        try:
+            if _strip_fragment(u) == _strip_fragment(homepage_url):
+                return "homepage"
+        except Exception:
+            pass
+
+    if path in ("/", ""):
+        return "homepage"
+    if any(k in path for k in ("/about", "about-us", "our-story", "company")):
+        return "about"
+    if any(k in path for k in ("/contact", "contact-us", "support")):
+        return "contact"
+    if any(k in path for k in ("privacy", "terms", "refund", "return", "shipping", "policy", "legal")):
+        return "policy"
+    if any(k in path for k in ("/products/", "/product/")):
+        return "product"
+    if any(k in path for k in ("/collections/", "/category/", "/categories/")):
+        return "collection"
+    if any(k in path for k in ("/blog", "/news", "/articles/", "/post/")):
+        return "blog"
+    if any(k in path for k in ("/cart", "/checkout")):
+        return "checkout"
+    if any(k in path for k in ("/account", "/login", "/register", "/signin", "/signup")):
+        return "account"
+    if any(k in path for k in ("/search", "/s/", "/tag/")):
+        return "search"
+    return "other"
+
+
+def _is_low_value_page(u: str) -> bool:
+    """Exclude pages that are usually not useful for legitimacy judgments."""
+    try:
+        p = urlparse(u)
+        path = (p.path or "").lower()
+    except Exception:
+        return True
+
+    # Obvious infrastructure / bot-protection endpoints
+    if path.startswith("/cdn-cgi/") or path.startswith("/.well-known/"):
+        return True
+
+    # Common high-noise endpoints
+    if any(seg in path for seg in ("/cart", "/checkout", "/account", "/login", "/register", "/signin", "/signup")):
+        return True
+    if "/search" in path:
+        return True
+
+    # CMS/admin
+    if path.startswith(("/wp-admin", "/wp-login", "/admin")):
+        return True
+
+    # Assets already handled elsewhere, but keep as defense-in-depth.
+    if _is_probably_asset_url(path):
+        return True
+
+    # Avoid extremely deep paths which are often tracking or paginated noise
+    if path.count("/") > 8:
+        return True
+
+    return False
+
+
+_SCRIPT_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.IGNORECASE | re.DOTALL)
+_STYLE_RE = re.compile(r"<style\b[^>]*>.*?</style>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_OPEN_RE = re.compile(r"<script\b([^>]*)>", re.IGNORECASE)
+
+
+def _strip_scripts_styles_keep_jsonld(html: str) -> str:
+    """Remove scripts/styles to reduce noise while keeping JSON-LD (often useful).
+
+    This is a best-effort sanitizer (we don't execute JS).
+    """
+    if not html:
+        return html
+
+    # Strip <style>
+    cleaned = re.sub(_STYLE_RE, " ", html)
+
+    # For <script>, keep only ld+json scripts.
+    out_parts: list[str] = []
+    idx = 0
+    for m in re.finditer(r"<script\b[^>]*>.*?</script>", cleaned, flags=re.IGNORECASE | re.DOTALL):
+        chunk = cleaned[idx:m.start()]
+        if chunk:
+            out_parts.append(chunk)
+
+        block = m.group(0)
+        open_m = _SCRIPT_OPEN_RE.search(block)
+        attrs = (open_m.group(1) if open_m else "").lower()
+        if "ld+json" in attrs:
+            out_parts.append(block)
+        else:
+            out_parts.append(" ")
+        idx = m.end()
+    out_parts.append(cleaned[idx:])
+    cleaned = "".join(out_parts)
+
+    # Collapse whitespace a bit to save prompt budget.
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
 def _extract_internal_links(html: str, base_url: str, hostname: str, limit: int = 8) -> list[str]:
     if not html:
         return []
@@ -135,6 +245,9 @@ def _extract_internal_links(html: str, base_url: str, hostname: str, limit: int 
             continue
 
         seen.add(normalized)
+        if _is_low_value_page(normalized):
+            continue
+
         candidates.append(normalized)
 
     def score_link(u: str) -> int:
@@ -205,6 +318,8 @@ def _fetch_sitemap_urls(base_url: str, hostname: str, timeout_ms: int, user_agen
         if _registrable_domain_guess(p.hostname.lower()) != _registrable_domain_guess(hostname.lower()):
             return
         if _is_probably_asset_url(p.path):
+            return
+        if _is_low_value_page(u):
             return
         norm = urlunparse(p._replace(query=""))
         if norm in seen:
@@ -299,8 +414,13 @@ def _fetch_page(url: str, timeout_ms: int, max_html_kb: int, user_agent: str) ->
                 if body:
                     try:
                         snippet = body.decode("utf-8", errors="replace")[:12000]
+                        snippet = _strip_scripts_styles_keep_jsonld(snippet)
                     except Exception:
                         snippet = None
+            else:
+                # Non-HTML pages are not useful for AI judgment.
+                if content_type and max_html_kb > 0:
+                    note = "Non-HTML content."
 
             if res.status_code in (403, 429) and not snippet:
                 note = "Page limited automated access."
@@ -312,9 +432,18 @@ def _fetch_page(url: str, timeout_ms: int, max_html_kb: int, user_agent: str) ->
                 content_type=content_type,
                 html_snippet=snippet,
                 fetch_note=note,
+                page_type=_classify_page_type(str(res.url) or url),
             )
     except Exception:
-        return CrawlPage(url=url, final_url=None, http_status=None, content_type=None, html_snippet=None, fetch_note="Unable to fetch page.")
+        return CrawlPage(
+            url=url,
+            final_url=None,
+            http_status=None,
+            content_type=None,
+            html_snippet=None,
+            fetch_note="Unable to fetch page.",
+            page_type=_classify_page_type(url),
+        )
 
 
 def _fetch_rdap_domain_age_days(hostname: str, timeout_ms: int) -> int | None:
@@ -391,6 +520,7 @@ def _fetch_http_signals(url: str, timeout_ms: int, max_html_kb: int, user_agent:
                     if html_available:
                         try:
                             html_snippet = body.decode("utf-8", errors="replace")[:30000]
+                            html_snippet = _strip_scripts_styles_keep_jsonld(html_snippet)
                         except Exception:
                             html_snippet = None
 
@@ -555,7 +685,8 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                     break
                 u = _strip_fragment(urljoin(origin, path))
                 if u not in links:
-                    links.append(u)
+                    if not _is_low_value_page(u):
+                        links.append(u)
 
         pages: list[CrawlPage] = []
         if links:

@@ -245,8 +245,12 @@ def judge_website(
             snippet = page.get("html_snippet") or ""
             if snippet:
                 page_url = page.get("final_url") or page.get("url") or "Unknown page"
+                page_type = (page.get("page_type") or "").strip()
                 # Use smaller per-page snippets so we can fit more pages into the prompt.
-                crawled_text += f"\n\n=== PAGE: {page_url} ===\n{snippet[:4500]}"
+                prefix = f"=== PAGE: {page_url} ==="
+                if page_type:
+                    prefix = f"=== PAGE ({page_type}): {page_url} ==="
+                crawled_text += f"\n\n{prefix}\n{snippet[:4500]}"
             if len(crawled_text) > 90000:
                 break
 
