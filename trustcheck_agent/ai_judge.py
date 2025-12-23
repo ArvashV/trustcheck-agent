@@ -13,6 +13,130 @@ import httpx
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 
 
+_ALLOWED_CONFIDENCE = {"high", "medium", "low"}
+_ALLOWED_VERDICTS = {"legitimate", "caution", "suspicious", "likely_deceptive"}
+_ALLOWED_CATEGORIES = {"e-commerce", "news", "corporate", "personal", "medical", "financial", "unknown"}
+_ALLOWED_PLATFORMS = {"shopify", "wordpress", "custom", "unknown"}
+
+
+def _as_str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (str, int, float, bool)):
+        return [str(value)]
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, (str, int, float, bool)):
+                s = str(item).strip()
+                if s:
+                    out.append(s)
+            else:
+                s = str(item).strip()
+                if s:
+                    out.append(s)
+        return out
+    return [str(value)]
+
+
+def _normalize_ai_output(raw: Any) -> dict[str, Any] | None:
+    """Normalize Gemini output to our expected schema.
+
+    Gemini occasionally returns partial/malformed JSON or unexpected enums.
+    This function clamps/normalizes fields so downstream code stays stable.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    # score
+    score_raw = raw.get("legitimacy_score")
+    score: int
+    try:
+        score = int(float(score_raw))
+    except Exception:
+        score = 50
+    score = max(0, min(100, score))
+
+    # confidence
+    confidence = str(raw.get("confidence") or "medium").strip().lower()
+    if confidence in ("med", "mid"):
+        confidence = "medium"
+    if confidence not in _ALLOWED_CONFIDENCE:
+        confidence = "medium"
+
+    # verdict
+    verdict_raw = str(raw.get("verdict") or "caution").strip().lower()
+    verdict_map = {
+        "ok": "legitimate",
+        "safe": "legitimate",
+        "legit": "legitimate",
+        "legitimate": "legitimate",
+        "caution": "caution",
+        "warning": "caution",
+        "warn": "caution",
+        "suspicious": "suspicious",
+        "sus": "suspicious",
+        "scam": "likely_deceptive",
+        "fraud": "likely_deceptive",
+        "deceptive": "likely_deceptive",
+        "likely_deceptive": "likely_deceptive",
+    }
+    verdict = verdict_map.get(verdict_raw, verdict_raw)
+    if verdict not in _ALLOWED_VERDICTS:
+        verdict = "caution"
+
+    # category
+    category = str(raw.get("category") or "unknown").strip().lower()
+    if category in ("ecommerce", "e-commerce", "shop", "store", "storefront"):
+        category = "e-commerce"
+    if category not in _ALLOWED_CATEGORIES:
+        category = "unknown"
+
+    detected_issues = _as_str_list(raw.get("detected_issues"))
+    positive_signals = _as_str_list(raw.get("positive_signals"))
+
+    platform = str(raw.get("platform") or "unknown").strip().lower()
+    platform_map = {
+        "woo": "wordpress",
+        "woocommerce": "wordpress",
+        "wp": "wordpress",
+        "wordpress": "wordpress",
+        "shopify": "shopify",
+        "custom": "custom",
+        "unknown": "unknown",
+        "magento": "custom",
+    }
+    platform = platform_map.get(platform, platform)
+    if platform not in _ALLOWED_PLATFORMS:
+        platform = "unknown"
+
+    product_legitimacy = str(raw.get("product_legitimacy") or "unknown").strip()
+    business_identity = str(raw.get("business_identity") or "unknown").strip()
+
+    summary = str(raw.get("summary") or "Analysis completed").strip()
+    recommendation = str(raw.get("recommendation") or "Exercise caution").strip()
+    if not summary:
+        summary = "Analysis completed"
+    if not recommendation:
+        recommendation = "Exercise caution"
+
+    return {
+        "legitimacy_score": score,
+        "confidence": confidence,
+        "verdict": verdict,
+        "category": category,
+        "detected_issues": detected_issues,
+        "positive_signals": positive_signals,
+        "platform": platform,
+        "product_legitimacy": product_legitimacy,
+        "business_identity": business_identity,
+        "summary": summary,
+        "recommendation": recommendation,
+    }
+
+
 def _build_prompt(site_data: dict[str, Any]) -> str:
     """Build the analysis prompt for Gemini."""
     return f"""You are TrustCheck AI, a world-class expert at detecting untrustworthy, deceptive, or potentially harmful websites. Your job is to analyze the provided website data and determine if the site is legitimate or potentially problematic.
@@ -228,15 +352,17 @@ def judge_website(
     Use Gemini to judge the website's legitimacy.
     Returns AI analysis result or None if failed.
     """
-    # Detect platform
+    # Detect platform (best-effort fingerprint)
     platform = "unknown"
     html_lower = (homepage_html or "").lower()
-    if "cdn.shopify.com" in html_lower or "shopify" in html_lower:
+    if not html_lower.strip():
+        platform = "unknown"
+    elif "cdn.shopify.com" in html_lower or "myshopify.com" in html_lower or "shopify" in html_lower:
         platform = "shopify"
-    elif "woocommerce" in html_lower or "wp-content" in html_lower:
-        platform = "woocommerce"
-    elif "magento" in html_lower:
-        platform = "magento"
+    elif "wp-content" in html_lower or "wp-includes" in html_lower or "wordpress" in html_lower or "woocommerce" in html_lower:
+        platform = "wordpress"
+    else:
+        platform = "custom"
 
     # Combine crawled pages text
     crawled_text = ""
@@ -269,10 +395,5 @@ def judge_website(
 
     prompt = _build_prompt(site_data)
     result = _call_gemini(prompt)
-
-    if result and isinstance(result.get("legitimacy_score"), (int, float)):
-        # Clamp score
-        result["legitimacy_score"] = max(0, min(100, int(result["legitimacy_score"])))
-        return result
-
-    return None
+    normalized = _normalize_ai_output(result)
+    return normalized

@@ -4,6 +4,7 @@ import re
 import socket
 import ssl
 import time
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
@@ -30,6 +31,24 @@ _WELL_KNOWN_DOMAINS = {
     "linkedin.com",
     "reddit.com",
 }
+
+
+_KNOWN_TLS_ISSUER_HINTS = (
+    "let's encrypt",
+    "digicert",
+    "globalsign",
+    "sectigo",
+    "comodoca",
+    "godaddy",
+    "amazon",
+    "aws",
+    "google trust services",
+    "gts",
+    "cloudflare",
+    "microsoft",
+    "entrust",
+    "idenTrust".lower(),
+)
 
 
 def _clamp_score(score: int) -> int:
@@ -74,6 +93,178 @@ def _is_well_known(hostname: str) -> bool:
 
 
 _HREF_RE = re.compile(r"href\s*=\s*([\"']?)([^\"'\s>]+)\1", re.IGNORECASE)
+
+_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+
+
+def _extract_emails(text: str) -> set[str]:
+    if not text:
+        return set()
+    emails = {m.group(0).strip().lower() for m in _EMAIL_RE.finditer(text)}
+    return {e for e in emails if ".." not in e and not e.endswith("@example.com")}
+
+
+def _looks_like_address(text: str) -> bool:
+    t = (text or "").strip()
+    if len(t) < 10:
+        return False
+    if any(k in t.lower() for k in ("street", "st.", "road", "rd.", "avenue", "ave", "suite", "floor", "building", "blvd", "zip", "postcode")):
+        return True
+    if re.search(r"\b\d{1,5}\b.*?,.*?\b[a-zA-Z]{3,}", t):
+        return True
+    return False
+
+
+def _normalize_address(addr: str) -> str:
+    a = (addr or "").strip().lower()
+    a = re.sub(r"\s+", " ", a)
+    a = re.sub(r"[^a-z0-9 ,.#/-]", "", a)
+    return a[:200]
+
+
+def _extract_jsonld_blocks(html: str) -> list[str]:
+    if not html:
+        return []
+    blocks: list[str] = []
+    for m in re.finditer(r"<script\b[^>]*type=\"application/ld\+json\"[^>]*>(.*?)</script>", html, flags=re.IGNORECASE | re.DOTALL):
+        content = (m.group(1) or "").strip()
+        if content:
+            blocks.append(content)
+    return blocks
+
+
+def _try_parse_json_fragment(s: str) -> Any | None:
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    m = re.search(r"(\{.*\}|\[.*\])", s, flags=re.DOTALL)
+    if not m:
+        return None
+    frag = m.group(1)
+    try:
+        return json.loads(frag)
+    except Exception:
+        return None
+
+
+def _walk_json(obj: Any):
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk_json(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_json(v)
+
+
+def _extract_org_identity_from_html(html: str) -> tuple[set[str], set[str]]:
+    names: set[str] = set()
+    addresses: set[str] = set()
+
+    for block in _extract_jsonld_blocks(html):
+        parsed = _try_parse_json_fragment(block)
+        if parsed is None:
+            continue
+        for node in _walk_json(parsed):
+            if not isinstance(node, dict):
+                continue
+            t = node.get("@type")
+            if isinstance(t, str) and t.lower() in ("organization", "localbusiness", "corporation"):
+                name = node.get("name")
+                if isinstance(name, str) and name.strip():
+                    names.add(name.strip()[:120])
+
+                addr = node.get("address")
+                if isinstance(addr, dict):
+                    parts: list[str] = []
+                    for k in ("streetAddress", "addressLocality", "addressRegion", "postalCode", "addressCountry"):
+                        v = addr.get(k)
+                        if isinstance(v, str) and v.strip():
+                            parts.append(v.strip())
+                    joined = ", ".join(parts).strip()
+                    if joined and _looks_like_address(joined):
+                        addresses.add(joined[:220])
+                elif isinstance(addr, str) and addr.strip() and _looks_like_address(addr):
+                    addresses.add(addr.strip()[:220])
+
+    for m in re.finditer(r"©\s*(?:19\d{2}|20\d{2})\s*([^<\n\r]{2,80})", html, flags=re.IGNORECASE):
+        candidate = (m.group(1) or "").strip(" .\t")
+        if candidate:
+            names.add(candidate[:120])
+
+    for m in re.finditer(r"(?:address|registered office)\s*[:\-]?\s*([^<\n\r]{12,200})", html, flags=re.IGNORECASE):
+        candidate = (m.group(1) or "").strip()
+        if candidate and _looks_like_address(candidate):
+            addresses.add(candidate[:220])
+
+    return names, addresses
+
+
+_US_UK_PAIRS = (
+    ("color", "colour"),
+    ("favorite", "favourite"),
+    ("organize", "organise"),
+    ("center", "centre"),
+    ("license", "licence"),
+    ("analyze", "analyse"),
+)
+
+
+def _mixed_us_uk_spelling(text: str) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    for us, uk in _US_UK_PAIRS:
+        if us in t and uk in t:
+            return True
+    return False
+
+
+def _language_quality_score(text: str) -> int:
+    if not text:
+        return 0
+    t = re.sub(r"\s+", " ", text).strip()
+    if len(t) < 200:
+        return 35
+
+    score = 80
+    lower = t.lower()
+    if "lorem ipsum" in lower:
+        score -= 30
+    if re.search(r"[!?.,]{4,}", t):
+        score -= 12
+
+    letters = sum(1 for ch in t if ch.isalpha())
+    nonspace = sum(1 for ch in t if not ch.isspace())
+    if nonspace > 0:
+        alpha_ratio = letters / nonspace
+        if alpha_ratio < 0.55:
+            score -= 18
+        elif alpha_ratio < 0.7:
+            score -= 8
+
+    words = re.findall(r"[A-Za-z]{2,}", t)
+    if len(words) < 60:
+        score -= 10
+    long_words = [w for w in words if len(w) >= 18]
+    if len(words) > 0 and (len(long_words) / len(words)) > 0.05:
+        score -= 8
+
+    return max(0, min(100, int(score)))
+
+
+def _detect_platform_from_html(html: str | None) -> str:
+    h = (html or "").lower()
+    if not h.strip():
+        return "unknown"
+    if "cdn.shopify.com" in h or "myshopify.com" in h or "shopify" in h:
+        return "shopify"
+    if "wp-content" in h or "wp-includes" in h or "wordpress" in h or "wp-json" in h or "woocommerce" in h:
+        return "wordpress"
+    return "custom"
 
 
 def _strip_fragment(u: str) -> str:
@@ -383,24 +574,102 @@ def _extract_nav_links(html: str, base_url: str, hostname: str, limit: int = 12)
 
 
 def _looks_like_ecommerce(html: str | None) -> bool:
+    return _ecommerce_signal_count(html) >= 2
+
+
+def _ecommerce_signal_count(html: str | None) -> int:
+    return len(_ecommerce_signals(html))
+
+
+def _ecommerce_signals(html: str | None) -> set[str]:
+    """Return a set of independent ecommerce signals found in HTML.
+
+    We intentionally require multiple distinct signals to reduce false positives.
+    """
     if not html:
-        return False
+        return set()
     h = html.lower()
-    return any(
-        k in h
-        for k in (
-            "cdn.shopify.com",
-            "shopify",
-            "woocommerce",
-            "wp-content",
-            "add to cart",
-            "cart",
-            "checkout",
-            "buy now",
-            "product",
-            "sku",
-            "variant",
+    signals: set[str] = set()
+
+    # Platform signals
+    if "cdn.shopify.com" in h or "myshopify.com" in h:
+        signals.add("shopify")
+    if "woocommerce" in h and ("wp-content" in h or "wp-json" in h):
+        signals.add("woocommerce")
+    if "magento" in h:
+        signals.add("magento")
+
+    # Commerce UI/actions
+    if "add to cart" in h or "data-add-to-cart" in h or "add-to-cart" in h:
+        signals.add("add_to_cart")
+    if "checkout" in h or "begin checkout" in h:
+        signals.add("checkout")
+    if "cart" in h and ("/cart" in h or "basket" in h):
+        signals.add("cart")
+
+    # Product schema + pricing
+    if "\"@type\"" in h and "\"product\"" in h:
+        signals.add("product_schema")
+    if "pricecurrency" in h or "itemprop=\"price\"" in h or "data-price" in h:
+        signals.add("pricing")
+    if "sku" in h and "variant" in h:
+        signals.add("sku_variant")
+
+    return signals
+
+
+def _tls_issuer_verdict_and_detail(tls: TLSInfo) -> tuple[Verdict, str] | None:
+    if not tls.supported:
+        return None
+
+    issuer = (tls.issuer or "").strip()
+    subject = (tls.subject or "").strip()
+    if not issuer:
+        return ("unknown", "Certificate issuer was not available.")
+
+    issuer_lower = issuer.lower()
+    if subject and issuer == subject:
+        return ("warn", "Certificate appears self-issued (issuer equals subject). This is unusual for public websites.")
+
+    if any(hint in issuer_lower for hint in _KNOWN_TLS_ISSUER_HINTS):
+        return ("good", "Certificate is issued by a commonly trusted public CA.")
+
+    return ("warn", "Certificate issuer is uncommon. This can be legitimate, but it’s worth extra caution.")
+
+
+def _registrable_domain_or_host(host: str) -> str:
+    host = (host or "").strip().lower()
+    if not host:
+        return ""
+    return _registrable_domain_guess(host)
+
+
+def _redirect_verdict_and_detail(initial_url: str, fetch: FetchInfo) -> tuple[Verdict, str] | None:
+    chain = fetch.redirect_chain or []
+    if not chain:
+        return None
+
+    try:
+        initial_host = urlparse(initial_url).hostname or ""
+    except Exception:
+        initial_host = ""
+    try:
+        final_host = urlparse(fetch.final_url or initial_url).hostname or ""
+    except Exception:
+        final_host = ""
+
+    initial_reg = _registrable_domain_or_host(initial_host)
+    final_reg = _registrable_domain_or_host(final_host)
+
+    if initial_reg and final_reg and initial_reg != final_reg:
+        return (
+            "bad",
+            f"Homepage redirected {len(chain)} time(s) and ended on a different domain ({final_host}). This is a common phishing/scam pattern.",
         )
+
+    return (
+        "warn",
+        f"Homepage redirected {len(chain)} time(s) before loading. This can be normal, but increases risk if the destination is unexpected.",
     )
 
 
@@ -822,6 +1091,9 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     if tls is None:
         tls = TLSInfo(supported=False)
 
+    ecommerce_signals = _ecommerce_signals(fetch.html_snippet)
+    detected_platform = _detect_platform_from_html(fetch.html_snippet)
+
     # Crawl internal links for AI context (aim: 8-12 pages). Do best-effort even if homepage HTML is blocked.
     crawl_info: CrawlInfo | None = None
     try:
@@ -879,7 +1151,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         candidate_pool.extend(sitemap_links)
 
         # E-commerce enrichment: make sure we crawl some real product pages.
-        if _looks_like_ecommerce(fetch.html_snippet):
+        if len(ecommerce_signals) >= 2:
             # Prefer sitemap candidates first (more reliable coverage than random internal links)
             pool_dedup: list[str] = []
             seen_pool: set[str] = set()
@@ -958,6 +1230,166 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             domain_detail = "Very new domain (under 6 months)."
     explainability.append(ExplainabilityItem(key="domainAge", label="Domain age", verdict=domain_verdict, detail=domain_detail))
 
+    # Repurposed domain heuristic: older domains that look like a generic storefront
+    if (
+        domain_age_days is not None
+        and domain_age_days >= 365
+        and not is_well_known
+        and len(ecommerce_signals) >= 2
+    ):
+        explainability.append(
+            ExplainabilityItem(
+                key="domainRepurpose",
+                label="Domain repurpose risk",
+                verdict="warn",
+                detail="Older domain now appears to operate as a storefront. Some scams repurpose aged domains; verify company identity, address, and policies.",
+            )
+        )
+
+    # Platform fingerprinting
+    if detected_platform != "unknown":
+        platform_verdict: Verdict = "good" if detected_platform == "custom" else "warn"
+        platform_detail = f"Platform fingerprint: {detected_platform}."
+        if detected_platform in ("shopify", "wordpress") and not is_well_known:
+            platform_detail = (
+                f"Platform fingerprint: {detected_platform}. Hosted storefront platforms require extra verification of business identity and policies."
+            )
+        explainability.append(
+            ExplainabilityItem(
+                key="platform",
+                label="Platform fingerprint",
+                verdict=platform_verdict,
+                detail=platform_detail,
+            )
+        )
+
+    # Ownership identity extraction (best-effort)
+    try:
+        pages_for_identity: list[str] = [fetch.html_snippet or ""]
+        if crawl_info and crawl_info.pages:
+            for p in crawl_info.pages[:20]:
+                if p.html_snippet:
+                    pages_for_identity.append(p.html_snippet)
+
+        company_names: list[str] = []
+        addresses: list[str] = []
+        emails: set[str] = set()
+        addr_counts: dict[str, int] = {}
+
+        for html in pages_for_identity:
+            if not html:
+                continue
+            emails |= _extract_emails(html)
+            names, addrs = _extract_org_identity_from_html(html)
+            company_names.extend(list(names))
+            addresses.extend(list(addrs))
+            for a in addrs:
+                norm = _normalize_address(a)
+                if norm:
+                    addr_counts[norm] = addr_counts.get(norm, 0) + 1
+
+        name_counts: dict[str, int] = {}
+        for n in company_names:
+            key = (n or "").strip()
+            if key:
+                name_counts[key] = name_counts.get(key, 0) + 1
+        top_name = sorted(name_counts.items(), key=lambda kv: kv[1], reverse=True)[0][0] if name_counts else None
+
+        top_addr = None
+        if addr_counts:
+            best_norm = sorted(addr_counts.items(), key=lambda kv: kv[1], reverse=True)[0][0]
+            for a in addresses:
+                if _normalize_address(a) == best_norm:
+                    top_addr = a
+                    break
+
+        site_reg = _registrable_domain_guess(hostname.lower())
+        email_domains = sorted({e.split("@", 1)[-1] for e in emails if "@" in e})
+        email_reg_domains = sorted({_registrable_domain_guess(d.lower()) for d in email_domains if d})
+        email_mismatch = bool(email_reg_domains and site_reg and all(ed != site_reg for ed in email_reg_domains))
+
+        conflicting_addresses = len(set(addr_counts.keys())) >= 2
+        addr_repeated = any(c >= 2 for c in addr_counts.values()) if addr_counts else False
+
+        details: list[str] = []
+        if top_name:
+            details.append(f"Company name: {top_name}")
+        if top_addr:
+            details.append("Address found")
+        if email_domains:
+            details.append(f"Email domain(s): {', '.join(email_domains[:3])}{'…' if len(email_domains) > 3 else ''}")
+
+        ownership_verdict: Verdict = "unknown"
+        if details:
+            ownership_verdict = "warn"
+        if top_name and (top_addr or email_domains) and not email_mismatch and not conflicting_addresses:
+            ownership_verdict = "good" if addr_repeated else "warn"
+            if top_addr and not addr_repeated:
+                details.append("Address appears on only one page")
+
+        if email_mismatch:
+            ownership_verdict = "warn"
+            details.append("Website domain and email domain do not match")
+            warnings.append("Ownership identity: website domain differs from contact email domain")
+
+        if conflicting_addresses:
+            ownership_verdict = "warn"
+            details.append("Different addresses appear across pages")
+            warnings.append("Ownership identity: multiple different addresses detected")
+
+        if details:
+            explainability.append(
+                ExplainabilityItem(
+                    key="ownershipIdentity",
+                    label="Ownership identity",
+                    verdict=ownership_verdict,
+                    detail=" • ".join(details),
+                )
+            )
+    except Exception:
+        pass
+
+    # Language consistency (homepage vs policy pages)
+    try:
+        homepage_quality = _language_quality_score(fetch.html_snippet or "")
+        policy_text = ""
+        if crawl_info and crawl_info.pages:
+            policy_snips = [p.html_snippet for p in crawl_info.pages if (p.page_type or "") == "policy" and p.html_snippet]
+            policy_text = "\n\n".join(policy_snips[:6])
+
+        policy_quality = _language_quality_score(policy_text)
+        mixed_spelling = _mixed_us_uk_spelling((fetch.html_snippet or "") + "\n" + (policy_text or ""))
+
+        lang_bits: list[str] = []
+        lang_verdict: Verdict = "unknown"
+        if homepage_quality:
+            lang_bits.append(f"Homepage quality: {homepage_quality}/100")
+        if policy_text.strip():
+            lang_bits.append(f"Policy quality: {policy_quality}/100")
+
+        if policy_text.strip() and (homepage_quality - policy_quality) >= 18 and policy_quality <= 55:
+            lang_verdict = "warn"
+            lang_bits.append("Policy pages read lower-quality than homepage")
+        elif mixed_spelling:
+            lang_verdict = "warn"
+            lang_bits.append("Mixed US/UK spelling detected")
+        elif homepage_quality >= 70 and (not policy_text.strip() or policy_quality >= 65):
+            lang_verdict = "good"
+        elif homepage_quality:
+            lang_verdict = "warn"
+
+        if lang_bits and lang_verdict != "unknown":
+            explainability.append(
+                ExplainabilityItem(
+                    key="languageConsistency",
+                    label="Language consistency",
+                    verdict=lang_verdict,
+                    detail=" • ".join(lang_bits),
+                )
+            )
+    except Exception:
+        pass
+
     # Established brand
     if is_well_known:
         explainability.append(ExplainabilityItem(
@@ -971,6 +1403,19 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             key="contentAvailability", label="Homepage content", verdict="unknown",
             detail=fetch.fetch_note or "Homepage content wasn't available for automated checks.",
         ))
+
+    # Redirect chain
+    redirect_info = _redirect_verdict_and_detail(normalized_url, fetch)
+    if redirect_info is not None:
+        redir_verdict, redir_detail = redirect_info
+        explainability.append(
+            ExplainabilityItem(
+                key="redirects",
+                label="Redirect behavior",
+                verdict=redir_verdict,
+                detail=redir_detail,
+            )
+        )
 
     # Security headers
     security_score = 0
@@ -1016,6 +1461,19 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             detail="TLS certificate could not be checked (site may not support HTTPS on 443).",
         ))
 
+    # TLS issuer interpretation
+    issuer_info = _tls_issuer_verdict_and_detail(tls)
+    if issuer_info is not None:
+        issuer_verdict, issuer_detail = issuer_info
+        explainability.append(
+            ExplainabilityItem(
+                key="tlsIssuer",
+                label="Certificate issuer",
+                verdict=issuer_verdict,
+                detail=issuer_detail,
+            )
+        )
+
     # Fetch external reviews
     external_reviews_text: str | None = None
     if req.check_external_reviews:
@@ -1042,18 +1500,22 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 
     if ai_result:
         try:
-            ai_judgment = AIJudgment(
-                legitimacy_score=ai_result.get("legitimacy_score", 50),
-                confidence=ai_result.get("confidence", "medium"),
-                verdict=ai_result.get("verdict", "caution"),
-                category=ai_result.get("category", "unknown"),
-                detected_issues=ai_result.get("detected_issues", []),
-                positive_signals=ai_result.get("positive_signals", []),
-                platform=ai_result.get("platform", "unknown"),
-                product_legitimacy=ai_result.get("product_legitimacy", "unknown"),
-                business_identity=ai_result.get("business_identity", "unknown"),
-                summary=ai_result.get("summary", "Analysis completed"),
-                recommendation=ai_result.get("recommendation", "Exercise caution"),
+            ai_judgment = AIJudgment.model_validate(ai_result)
+
+            conf = ai_judgment.confidence
+            conf_verdict: Verdict = "unknown"
+            if conf == "high":
+                conf_verdict = "good"
+            elif conf in ("medium", "low"):
+                conf_verdict = "warn"
+
+            explainability.append(
+                ExplainabilityItem(
+                    key="aiConfidence",
+                    label="AI confidence",
+                    verdict=conf_verdict,
+                    detail=f"{conf.capitalize()} confidence based on the quality/availability of evidence.",
+                )
             )
 
             # Add AI explainability
@@ -1082,7 +1544,32 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 
     # Score calculation - AI IS PRIMARY when available
     if ai_judgment:
-        final_score = _clamp_score(ai_judgment.legitimacy_score)
+        score = int(ai_judgment.legitimacy_score)
+
+        # Post-adjustments for high-signal technical indicators.
+        # These should be small so AI remains primary.
+        if redirect_info is not None:
+            redir_verdict, _ = redirect_info
+            if redir_verdict == "bad":
+                score -= 12
+            else:
+                score -= 2
+
+        if (
+            domain_age_days is not None
+            and domain_age_days >= 365
+            and not is_well_known
+            and len(ecommerce_signals) >= 2
+        ):
+            score -= 6
+
+        issuer_info2 = _tls_issuer_verdict_and_detail(tls)
+        if issuer_info2 is not None:
+            issuer_verdict2, _ = issuer_info2
+            if issuer_verdict2 == "warn":
+                score -= 2
+
+        final_score = _clamp_score(score)
     else:
         # Fallback heuristic
         score = 50
