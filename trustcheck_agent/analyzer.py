@@ -294,6 +294,94 @@ def _extract_internal_links(html: str, base_url: str, hostname: str, limit: int 
     return out
 
 
+def _extract_nav_links(html: str, base_url: str, hostname: str, limit: int = 12) -> list[str]:
+    """Try to extract human-navigation links from <nav>/<header>/menu sections.
+
+    This is intentionally heuristic (no JS execution, no full DOM parser).
+    It tends to find: About/Contact/Policies/Collections/Blog links.
+    """
+    if not html:
+        return []
+
+    blocks: list[str] = []
+
+    # Prefer explicit <nav> blocks.
+    for m in re.finditer(r"<nav\b[^>]*>.*?</nav>", html, flags=re.IGNORECASE | re.DOTALL):
+        blocks.append(m.group(0))
+
+    # Header often contains nav.
+    for m in re.finditer(r"<header\b[^>]*>.*?</header>", html, flags=re.IGNORECASE | re.DOTALL):
+        blocks.append(m.group(0))
+
+    # Common class names for navbar/menu.
+    for m in re.finditer(
+        r"<[^>]+class=\"[^\"]*(?:nav|navbar|menu|topbar|header)[^\"]*\"[^>]*>.*?</[^>]+>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        blocks.append(m.group(0))
+
+    if not blocks:
+        return []
+
+    # Deduplicate blocks a bit and cap work.
+    joined = "\n".join(blocks[:6])
+
+    base_domain = _registrable_domain_guess(hostname.lower())
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    for _, href in _HREF_RE.findall(joined):
+        href = (href or "").strip()
+        if not href:
+            continue
+        if href.startswith("mailto:") or href.startswith("tel:") or href.startswith("javascript:"):
+            continue
+
+        abs_url = urljoin(base_url, href)
+        abs_url = _strip_fragment(abs_url)
+        try:
+            p = urlparse(abs_url)
+        except Exception:
+            continue
+
+        if p.scheme not in ("http", "https") or not p.hostname:
+            continue
+        if _registrable_domain_guess(p.hostname.lower()) != base_domain:
+            continue
+        if p.path.lower().startswith(("/cdn/", "/assets/", "/static/", "/cdn-cgi/")):
+            continue
+        if _is_probably_asset_url(p.path):
+            continue
+
+        normalized = urlunparse(p._replace(query=""))
+        if normalized in seen:
+            continue
+        if _is_low_value_page(normalized):
+            continue
+
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    def nav_score(u: str) -> int:
+        path = urlparse(u).path.lower()
+        score = 0
+        for kw in ("contact", "about", "privacy", "terms", "refund", "return", "shipping", "policy", "track"):
+            if kw in path:
+                score += 30
+        for kw in ("/collections/", "/products/", "/pages/", "/blog", "/news"):
+            if kw in path:
+                score += 10
+        if path in ("/", ""):
+            score -= 10
+        return score
+
+    base_norm = _strip_fragment(base_url)
+    candidates = [c for c in candidates if c != base_norm]
+    candidates.sort(key=nav_score, reverse=True)
+    return candidates[:limit]
+
+
 def _fetch_sitemap_urls(base_url: str, hostname: str, timeout_ms: int, user_agent: str, limit: int = 40) -> list[str]:
     """Best-effort sitemap discovery.
 
@@ -640,7 +728,19 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 
         links: list[str] = []
         if fetch.html_snippet and fetch.html_available:
-            links.extend(_extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=target_count))
+            # 1) Navbar/header links first (human-important pages)
+            nav_links = _extract_nav_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=target_count)
+            for u in nav_links:
+                if u not in links:
+                    links.append(u)
+
+            # 2) Then general internal links to fill gaps
+            general_links = _extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=target_count)
+            for u in general_links:
+                if len(links) >= target_count:
+                    break
+                if u not in links:
+                    links.append(u)
 
         # If we still don't have enough, try sitemap.xml.
         if len(links) < 8:
