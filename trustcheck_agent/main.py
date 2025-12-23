@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -29,6 +31,26 @@ load_dotenv(_PY_AGENT_ROOT / ".env", override=False)
 load_dotenv(_MONOREPO_ROOT / ".env", override=False)
 
 app = FastAPI(title="TrustCheck Python Agent", version="0.1.0")
+
+_PLAYWRIGHT_CONCURRENCY = max(1, int(os.getenv("PLAYWRIGHT_CONCURRENCY", "1")))
+_PLAYWRIGHT_ACQUIRE_TIMEOUT_S = float(os.getenv("PLAYWRIGHT_ACQUIRE_TIMEOUT_S", "0.25"))
+_playwright_semaphore = asyncio.Semaphore(_PLAYWRIGHT_CONCURRENCY)
+
+
+@asynccontextmanager
+async def _playwright_slot():
+    try:
+        await asyncio.wait_for(_playwright_semaphore.acquire(), timeout=_PLAYWRIGHT_ACQUIRE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent busy (too many concurrent browser jobs). Please retry.",
+            headers={"Retry-After": "2"},
+        )
+    try:
+        yield
+    finally:
+        _playwright_semaphore.release()
 
 def _cors_allow_origins() -> list[str]:
     raw = os.getenv("TRUSTCHECK_CORS_ORIGINS", "").strip()
@@ -61,12 +83,13 @@ def analyze_endpoint(req: AnalyzeRequest):
 @app.post("/screenshot")
 async def screenshot_endpoint(req: ScreenshotRequest):
     try:
-        shot = await capture_screenshot(
-            req.url,
-            timeout_ms=req.timeout_ms,
-            full_page=req.full_page,
-        )
-        return Response(content=shot.data, media_type=shot.mime, headers={"cache-control": "no-store"})
+        async with _playwright_slot():
+            shot = await capture_screenshot(
+                req.url,
+                timeout_ms=req.timeout_ms,
+                full_page=req.full_page,
+            )
+            return Response(content=shot.data, media_type=shot.mime, headers={"cache-control": "no-store"})
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Screenshot failed: {e}")
 
@@ -74,12 +97,13 @@ async def screenshot_endpoint(req: ScreenshotRequest):
 @app.post("/screenshots", response_model=ScreenshotsResponse)
 async def screenshots_endpoint(req: ScreenshotsRequest):
     try:
-        shots = await capture_screenshot_timeline(
-            req.url,
-            delays_ms=req.delays_ms,
-            timeout_ms=req.timeout_ms,
-            full_page=req.full_page,
-        )
-        return {"shots": shots}
+        async with _playwright_slot():
+            shots = await capture_screenshot_timeline(
+                req.url,
+                delays_ms=req.delays_ms,
+                timeout_ms=req.timeout_ms,
+                full_page=req.full_page,
+            )
+            return {"shots": shots}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Screenshot timeline failed: {e}")
