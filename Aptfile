@@ -2,14 +2,14 @@
 # If you see missing-library errors at runtime, add the missing package here.
 ca-certificates
 fonts-liberation
-libasound2
-libatk-bridge2.0-0
-libatk1.0-0
+libasound2t64
+libatk-bridge2.0-0t64
+libatk1.0-0t64
 libcairo2
 libdrm2
 libgbm1
-libglib2.0-0
-libgtk-3-0
+libglib2.0-0t64
+libgtk-3-0t64
 libnss3
 libnspr4
 libpango-1.0-0
