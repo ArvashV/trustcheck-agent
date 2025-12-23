@@ -382,6 +382,108 @@ def _extract_nav_links(html: str, base_url: str, hostname: str, limit: int = 12)
     return candidates[:limit]
 
 
+def _looks_like_ecommerce(html: str | None) -> bool:
+    if not html:
+        return False
+    h = html.lower()
+    return any(
+        k in h
+        for k in (
+            "cdn.shopify.com",
+            "shopify",
+            "woocommerce",
+            "wp-content",
+            "add to cart",
+            "cart",
+            "checkout",
+            "buy now",
+            "product",
+            "sku",
+            "variant",
+        )
+    )
+
+
+def _is_product_like_url(u: str) -> bool:
+    try:
+        path = urlparse(u).path.lower()
+    except Exception:
+        return False
+    # Shopify/Commerce common patterns
+    if "/products/" in path or path.startswith("/product/") or "/product/" in path:
+        return True
+    # Other common patterns
+    if path.startswith(("/p/", "/item/", "/items/")):
+        return True
+    return False
+
+
+def _is_collection_like_url(u: str) -> bool:
+    try:
+        path = urlparse(u).path.lower()
+    except Exception:
+        return False
+    if "/collections/" in path or "/category/" in path or "/categories/" in path:
+        return True
+    if path.endswith("/shop") or path.endswith("/store"):
+        return True
+    return False
+
+
+def _ensure_ecommerce_pages(
+    links: list[str],
+    candidates: list[str],
+    target_count: int,
+    min_products: int = 3,
+    min_collections: int = 1,
+) -> list[str]:
+    """Ensure we crawl a few product + collection pages when the site is e-commerce.
+
+    We don't exceed target_count; we just bias which pages occupy the slots.
+    """
+    existing = list(links)
+    seen = set(existing)
+
+    def add_front(u: str):
+        nonlocal existing
+        if u in seen:
+            return
+        seen.add(u)
+        existing.insert(0, u)
+
+    def add_back(u: str):
+        nonlocal existing
+        if u in seen:
+            return
+        if len(existing) >= target_count:
+            return
+        seen.add(u)
+        existing.append(u)
+
+    product_existing = sum(1 for u in existing if _is_product_like_url(u))
+    collection_existing = sum(1 for u in existing if _is_collection_like_url(u))
+
+    # Prefer inserting missing product pages early (they are highly informative for scam patterns).
+    if product_existing < min_products:
+        for u in candidates:
+            if product_existing >= min_products:
+                break
+            if _is_product_like_url(u):
+                add_front(u)
+                product_existing += 1
+
+    if collection_existing < min_collections:
+        for u in candidates:
+            if collection_existing >= min_collections:
+                break
+            if _is_collection_like_url(u):
+                add_front(u)
+                collection_existing += 1
+
+    # If we inserted beyond target_count, trim from the end (keep the prioritized front).
+    return existing[:target_count]
+
+
 def _fetch_sitemap_urls(base_url: str, hostname: str, timeout_ms: int, user_agent: str, limit: int = 40) -> list[str]:
     """Best-effort sitemap discovery.
 
@@ -727,22 +829,30 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         target_count = 12
 
         links: list[str] = []
+        candidate_pool: list[str] = []
         if fetch.html_snippet and fetch.html_available:
             # 1) Navbar/header links first (human-important pages)
             nav_links = _extract_nav_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=target_count)
             for u in nav_links:
                 if u not in links:
                     links.append(u)
+            candidate_pool.extend(nav_links)
 
             # 2) Then general internal links to fill gaps
-            general_links = _extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=target_count)
+            general_links = _extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=max(24, target_count))
             for u in general_links:
                 if len(links) >= target_count:
                     break
                 if u not in links:
                     links.append(u)
+            candidate_pool.extend(general_links)
+
+            # 3) Build a bigger candidate pool so we can pick product pages if needed.
+            more_links = _extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=40)
+            candidate_pool.extend(more_links)
 
         # If we still don't have enough, try sitemap.xml.
+        sitemap_links: list[str] = []
         if len(links) < 8:
             sitemap_links = _fetch_sitemap_urls(base_url_for_crawl, hostname, timeout_ms=min(req.timeout_ms, 20000), user_agent=req.user_agent, limit=40)
             # Prefer “human pages” first for analysis.
@@ -765,6 +875,22 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                     break
                 if u not in links:
                     links.append(u)
+
+        candidate_pool.extend(sitemap_links)
+
+        # E-commerce enrichment: make sure we crawl some real product pages.
+        if _looks_like_ecommerce(fetch.html_snippet):
+            # Prefer sitemap candidates first (more reliable coverage than random internal links)
+            pool_dedup: list[str] = []
+            seen_pool: set[str] = set()
+            for u in (sitemap_links + candidate_pool):
+                if u in seen_pool:
+                    continue
+                if _is_low_value_page(u):
+                    continue
+                seen_pool.add(u)
+                pool_dedup.append(u)
+            links = _ensure_ecommerce_pages(links, pool_dedup, target_count=target_count, min_products=3, min_collections=1)
 
         # Final fallback: common paths (even without homepage HTML)
         if len(links) < 8:
