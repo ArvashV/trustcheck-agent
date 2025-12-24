@@ -1,6 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "Python version:"
+python --version
+
+echo "Working directory: $(pwd)"
+
+echo "Checking __future__ import placement in trustcheck_agent/screenshot.py..."
+python - <<'PY'
+from pathlib import Path
+
+p = Path("trustcheck_agent") / "screenshot.py"
+print(f"Exists: {p.exists()}  Path: {p.resolve()}")
+if p.exists():
+	lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+	hits = [i for i, l in enumerate(lines, 1) if "from __future__ import annotations" in l]
+	print(f"Total lines: {len(lines)}")
+	print(f"__future__ hits: {hits}")
+	print("First 8 lines:")
+	for i, l in enumerate(lines[:8], 1):
+		print(f"{i:>4}: {l}")
+	if len(lines) > 95:
+		print("Lines 95-140:")
+		for i in range(95, min(len(lines), 140) + 1):
+			print(f"{i:>4}: {lines[i-1]}")
+	print("Last 12 lines:")
+	start = max(1, len(lines) - 11)
+	for i in range(start, len(lines) + 1):
+		print(f"{i:>4}: {lines[i-1]}")
+PY
+
 echo "Compiling Python sources (syntax check)..."
 python -m compileall -q trustcheck_agent
 
