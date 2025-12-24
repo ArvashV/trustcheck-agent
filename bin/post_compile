@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "Compiling Python sources (syntax check)..."
+python -m compileall -q trustcheck_agent
+
 echo "Installing Playwright Chromium..."
 python -m playwright install chromium
