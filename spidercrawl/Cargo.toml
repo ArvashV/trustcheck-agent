@@ -1,0 +1,17 @@
+[package]
+name = "spidercrawl"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "spidercrawl"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+reqwest = { version = "0.12", features = ["gzip", "brotli"] }
+url = "2"
+scraper = "0.20"
+parking_lot = "0.12"
+regex = "1"

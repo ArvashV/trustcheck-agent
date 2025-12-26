@@ -1094,114 +1094,117 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     ecommerce_signals = _ecommerce_signals(fetch.html_snippet)
     detected_platform = _detect_platform_from_html(fetch.html_snippet)
 
-    # Crawl internal links for AI context (aim: 8-12 pages). Do best-effort even if homepage HTML is blocked.
+    # Crawl internal links for AI context
     crawl_info: CrawlInfo | None = None
     try:
         base_url_for_crawl = fetch.final_url or normalized_url
-        target_count = 12
 
-        links: list[str] = []
-        candidate_pool: list[str] = []
-        if fetch.html_snippet and fetch.html_available:
-            # 1) Navbar/header links first (human-important pages)
-            nav_links = _extract_nav_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=target_count)
-            for u in nav_links:
-                if u not in links:
-                    links.append(u)
-            candidate_pool.extend(nav_links)
+        if req.advanced_crawl:
+            from .spider_crawler import spider_crawl as do_spider_crawl
+            spider_result = do_spider_crawl(
+                start_url=base_url_for_crawl,
+                hostname=hostname,
+                timeout_ms=req.timeout_ms,
+                user_agent=req.user_agent,
+                max_pages=30,
+                max_depth=3,
+                max_concurrent=20,
+            )
+            crawl_info = CrawlInfo(
+                pages_requested=spider_result.pages_requested,
+                pages_fetched=spider_result.pages_fetched,
+                pages=spider_result.pages,
+                crawl_mode=spider_result.crawl_mode,
+                max_depth_reached=spider_result.max_depth_reached,
+            )
+        else:
+            target_count = 12
+            links: list[str] = []
+            candidate_pool: list[str] = []
+            if fetch.html_snippet and fetch.html_available:
+                nav_links = _extract_nav_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=target_count)
+                for u in nav_links:
+                    if u not in links:
+                        links.append(u)
+                candidate_pool.extend(nav_links)
 
-            # 2) Then general internal links to fill gaps
-            general_links = _extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=max(24, target_count))
-            for u in general_links:
-                if len(links) >= target_count:
-                    break
-                if u not in links:
-                    links.append(u)
-            candidate_pool.extend(general_links)
+                general_links = _extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=max(24, target_count))
+                for u in general_links:
+                    if len(links) >= target_count:
+                        break
+                    if u not in links:
+                        links.append(u)
+                candidate_pool.extend(general_links)
 
-            # 3) Build a bigger candidate pool so we can pick product pages if needed.
-            more_links = _extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=40)
-            candidate_pool.extend(more_links)
+                more_links = _extract_internal_links(fetch.html_snippet, base_url_for_crawl, hostname, limit=40)
+                candidate_pool.extend(more_links)
 
-        # If we still don't have enough, try sitemap.xml.
-        sitemap_links: list[str] = []
-        if len(links) < 8:
-            sitemap_links = _fetch_sitemap_urls(base_url_for_crawl, hostname, timeout_ms=min(req.timeout_ms, 20000), user_agent=req.user_agent, limit=40)
-            # Prefer “human pages” first for analysis.
-            def sm_score(u: str) -> int:
-                path = urlparse(u).path.lower()
-                score = 0
-                for kw in ("about", "contact", "privacy", "terms", "refund", "return", "shipping", "policy", "track"):
-                    if kw in path:
-                        score += 20
-                for kw in ("/products/", "/collections/", "/pages/"):
-                    if kw in path:
-                        score += 5
-                if path.endswith(".xml") or path.endswith(".json"):
-                    score -= 50
-                return score
+            sitemap_links: list[str] = []
+            if len(links) < 8:
+                sitemap_links = _fetch_sitemap_urls(base_url_for_crawl, hostname, timeout_ms=min(req.timeout_ms, 20000), user_agent=req.user_agent, limit=40)
+                def sm_score(u: str) -> int:
+                    path = urlparse(u).path.lower()
+                    score = 0
+                    for kw in ("about", "contact", "privacy", "terms", "refund", "return", "shipping", "policy", "track"):
+                        if kw in path:
+                            score += 20
+                    for kw in ("/products/", "/collections/", "/pages/"):
+                        if kw in path:
+                            score += 5
+                    if path.endswith(".xml") or path.endswith(".json"):
+                        score -= 50
+                    return score
 
-            sitemap_links.sort(key=sm_score, reverse=True)
-            for u in sitemap_links:
-                if len(links) >= target_count:
-                    break
-                if u not in links:
-                    links.append(u)
-
-        candidate_pool.extend(sitemap_links)
-
-        # E-commerce enrichment: make sure we crawl some real product pages.
-        if len(ecommerce_signals) >= 2:
-            # Prefer sitemap candidates first (more reliable coverage than random internal links)
-            pool_dedup: list[str] = []
-            seen_pool: set[str] = set()
-            for u in (sitemap_links + candidate_pool):
-                if u in seen_pool:
-                    continue
-                if _is_low_value_page(u):
-                    continue
-                seen_pool.add(u)
-                pool_dedup.append(u)
-            links = _ensure_ecommerce_pages(links, pool_dedup, target_count=target_count, min_products=3, min_collections=1)
-
-        # Final fallback: common paths (even without homepage HTML)
-        if len(links) < 8:
-            origin = f"{urlparse(base_url_for_crawl).scheme}://{hostname}"
-            for path in (
-                "/pages/contact",
-                "/pages/about-us",
-                "/contact",
-                "/about",
-                "/policies/privacy-policy",
-                "/policies/refund-policy",
-                "/policies/terms-of-service",
-                "/policies/shipping-policy",
-                "/collections/all",
-                "/search",
-            ):
-                if len(links) >= target_count:
-                    break
-                u = _strip_fragment(urljoin(origin, path))
-                if u not in links:
-                    if not _is_low_value_page(u):
+                sitemap_links.sort(key=sm_score, reverse=True)
+                for u in sitemap_links:
+                    if len(links) >= target_count:
+                        break
+                    if u not in links:
                         links.append(u)
 
-        pages: list[CrawlPage] = []
-        if links:
-            # More workers because we fetch more pages now.
-            with ThreadPoolExecutor(max_workers=min(12, max(4, len(links)))) as crawl_pool:
-                crawl_futs = [
-                    crawl_pool.submit(_fetch_page, link, req.timeout_ms, min(req.max_html_kb, 256), req.user_agent)
-                    for link in links[:target_count]
-                ]
-                for fut in as_completed(crawl_futs):
-                    try:
-                        pages.append(fut.result())
-                    except Exception:
-                        continue
+            candidate_pool.extend(sitemap_links)
 
-        pages_fetched = sum(1 for p in pages if p.http_status is not None)
-        crawl_info = CrawlInfo(pages_requested=len(links[:target_count]), pages_fetched=pages_fetched, pages=pages)
+            if len(ecommerce_signals) >= 2:
+                pool_dedup: list[str] = []
+                seen_pool: set[str] = set()
+                for u in (sitemap_links + candidate_pool):
+                    if u in seen_pool:
+                        continue
+                    if _is_low_value_page(u):
+                        continue
+                    seen_pool.add(u)
+                    pool_dedup.append(u)
+                links = _ensure_ecommerce_pages(links, pool_dedup, target_count=target_count, min_products=3, min_collections=1)
+
+            if len(links) < 8:
+                origin = f"{urlparse(base_url_for_crawl).scheme}://{hostname}"
+                for path in (
+                    "/pages/contact", "/pages/about-us", "/contact", "/about",
+                    "/policies/privacy-policy", "/policies/refund-policy",
+                    "/policies/terms-of-service", "/policies/shipping-policy",
+                    "/collections/all", "/search",
+                ):
+                    if len(links) >= target_count:
+                        break
+                    u = _strip_fragment(urljoin(origin, path))
+                    if u not in links and not _is_low_value_page(u):
+                        links.append(u)
+
+            pages: list[CrawlPage] = []
+            if links:
+                with ThreadPoolExecutor(max_workers=min(12, max(4, len(links)))) as crawl_pool:
+                    crawl_futs = [
+                        crawl_pool.submit(_fetch_page, link, req.timeout_ms, min(req.max_html_kb, 256), req.user_agent)
+                        for link in links[:target_count]
+                    ]
+                    for fut in as_completed(crawl_futs):
+                        try:
+                            pages.append(fut.result())
+                        except Exception:
+                            continue
+
+            pages_fetched = sum(1 for p in pages if p.http_status is not None)
+            crawl_info = CrawlInfo(pages_requested=len(links[:target_count]), pages_fetched=pages_fetched, pages=pages, crawl_mode="basic")
     except Exception:
         crawl_info = None
 

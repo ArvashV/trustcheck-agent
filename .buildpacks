@@ -1,0 +1,14 @@
+# Heroku buildpacks configuration
+# Add these in order via: heroku buildpacks:add <url>
+#
+# 1. heroku/python (default)
+# 2. heroku-community/apt (for Aptfile)
+# 3. emk/rust (optional, for Rust spider crawler)
+#
+# If Rust buildpack is not added, Python fallback is used automatically.
+#
+# Setup commands:
+#   heroku buildpacks:clear
+#   heroku buildpacks:add heroku-community/apt
+#   heroku buildpacks:add emk/rust
+#   heroku buildpacks:add heroku/python

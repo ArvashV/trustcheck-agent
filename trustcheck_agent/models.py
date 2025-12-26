@@ -17,6 +17,7 @@ class AnalyzeRequest(BaseModel):
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 TrustCheckAgent/2.0"
     )
     check_external_reviews: bool = Field(True)
+    advanced_crawl: bool = Field(False)
 
 
 class ExplainabilityItem(BaseModel):
@@ -59,6 +60,8 @@ class CrawlInfo(BaseModel):
     pages_requested: int
     pages_fetched: int
     pages: list[CrawlPage]
+    crawl_mode: str = "basic"
+    max_depth_reached: int = 0
 
 
 class AIJudgment(BaseModel):
