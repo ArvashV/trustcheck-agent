@@ -15,7 +15,8 @@ try:
 except ImportError:
     RUST_AVAILABLE = False
 
-_HREF_RE = re.compile(r"href\s*=\s*([\"']?)([^\"'\s>]+)\1", re.IGNORECASE)
+_HREF_RE = re.compile(r'''href\s*=\s*["']([^"']+)["']''', re.IGNORECASE)
+_HREF_RE_NOQUOTE = re.compile(r'''href\s*=\s*([^\s>"']+)''', re.IGNORECASE)
 
 class SpiderLink:
     def __init__(self, url: str, parent_url: str | None, depth: int, link_type: str):
@@ -87,13 +88,13 @@ def _python_spider_crawl(
             with httpx.Client(timeout=timeout, follow_redirects=True) as client:
                 res = client.get(url, headers={
                     "user-agent": user_agent,
-                    "accept": "text/html,*/*;q=0.8",
+                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "accept-language": "en-US,en;q=0.6",
                 })
                 content_type = res.headers.get("content-type")
                 snippet = None
                 if content_type and "text/html" in content_type.lower():
-                    snippet = res.text[:12000]
+                    snippet = res.text[:50000]
                     snippet = _strip_scripts(snippet)
                 return CrawlPage(
                     url=url, final_url=str(res.url), http_status=res.status_code,
@@ -105,12 +106,21 @@ def _python_spider_crawl(
     def extract_links(html: str, base_url: str) -> list[tuple[str, str]]:
         links = []
         base_domain = _get_domain(hostname)
-        for _, href in _HREF_RE.findall(html):
+        
+        hrefs = set()
+        for m in _HREF_RE.finditer(html):
+            hrefs.add(m.group(1))
+        for m in _HREF_RE_NOQUOTE.finditer(html):
+            hrefs.add(m.group(1))
+        
+        for href in hrefs:
             href = (href or "").strip()
-            if not href or href.startswith(("mailto:", "tel:", "javascript:")):
+            if not href or href.startswith(("mailto:", "tel:", "javascript:", "#", "data:")):
                 continue
-            abs_url = urljoin(base_url, href)
+            if href.startswith("//"):
+                href = "https:" + href
             try:
+                abs_url = urljoin(base_url, href)
                 p = urlparse(abs_url)
                 if p.scheme not in ("http", "https") or not p.hostname:
                     continue
