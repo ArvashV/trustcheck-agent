@@ -1,9 +1,11 @@
 use crate::{SpiderCrawlResult, CrawlPage, SpiderLink};
-use crate::graph::{LinkGraph, LinkEntry};
+use crate::graph::LinkGraph;
 use crate::fetcher::{Fetcher, FetchResult};
 use scraper::{Html, Selector};
 use url::Url;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use tokio::runtime::Runtime;
 
 pub fn run_spider(
@@ -106,12 +108,14 @@ fn result_to_page(result: &FetchResult, original_url: &str) -> CrawlPage {
 
 fn extract_links(html: &str, base_url: &str, hostname: &str) -> Vec<(String, String)> {
     let mut links = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let document = Html::parse_document(html);
     let selector = Selector::parse("a[href]").unwrap();
     let base = match Url::parse(base_url) {
         Ok(u) => u,
         Err(_) => return links,
     };
+    let target_domain = get_registrable_domain(hostname);
 
     for element in document.select(&selector) {
         if let Some(href) = element.value().attr("href") {
@@ -120,9 +124,13 @@ fn extract_links(html: &str, base_url: &str, hostname: &str) -> Vec<(String, Str
             }
             if let Ok(abs_url) = base.join(href) {
                 if let Some(host) = abs_url.host_str() {
-                    if host.ends_with(hostname) || hostname.ends_with(host) {
-                        let url_str = abs_url.to_string();
-                        if !is_asset(&url_str) && !is_low_value(&url_str) {
+                    // Use registrable domain comparison — prevents matching
+                    // unrelated sites like evil-example.com ≠ example.com
+                    // and correctly groups sub.store.co.uk = store.co.uk.
+                    if get_registrable_domain(host) == target_domain {
+                        let url_str = normalize_crawl_url(&abs_url.to_string());
+                        if !is_asset(&url_str) && !is_low_value(&url_str) && !seen.contains(&url_str) {
+                            seen.insert(url_str.clone());
                             let link_type = if is_nav_context(&element) { "nav" } else { "internal" };
                             links.push((url_str, link_type.to_string()));
                         }
@@ -158,34 +166,64 @@ fn is_nav_context(element: &scraper::ElementRef) -> bool {
     false
 }
 
+/// Word-boundary-aware trust keyword regex for scoring.
+static TRUST_KW_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|/)(?:contact|about|privacy|terms|refund|returns?|shipping|policy|policies)(?:$|/|-us|-page)").unwrap()
+});
+static COMMERCE_PATH_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)/(?:products|collections|pages)/").unwrap()
+});
+
 fn score_link(url: &str) -> i32 {
-    let path = url.to_lowercase();
+    let path = match Url::parse(url) {
+        Ok(u) => u.path().to_lowercase(),
+        Err(_) => url.to_lowercase(),
+    };
     let mut score = 0;
-    for kw in ["contact", "about", "privacy", "terms", "refund", "return", "shipping", "policy"] {
-        if path.contains(kw) { score += 30; }
-    }
-    for kw in ["/products/", "/collections/", "/pages/"] {
-        if path.contains(kw) { score += 10; }
-    }
+    if TRUST_KW_RE.is_match(&path) { score += 30; }
+    if COMMERCE_PATH_RE.is_match(&path) { score += 10; }
     score
 }
 
 fn classify_page(url: &str) -> String {
-    let path = url.to_lowercase();
-    if path.ends_with('/') || path.split('/').last().map(|s| s.is_empty()).unwrap_or(true) {
+    let path = match Url::parse(url) {
+        Ok(u) => u.path().to_lowercase(),
+        Err(_) => url.to_lowercase(),
+    };
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
         return "homepage".to_string();
     }
-    if path.contains("about") { return "about".to_string(); }
-    if path.contains("contact") { return "contact".to_string(); }
-    if path.contains("privacy") || path.contains("terms") || path.contains("policy") { return "policy".to_string(); }
-    if path.contains("/product") { return "product".to_string(); }
-    if path.contains("/collection") || path.contains("/category") { return "collection".to_string(); }
+    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in &segments {
+        match *seg {
+            "about" | "about-us" | "our-story" | "company" => return "about".to_string(),
+            "contact" | "contact-us" | "support" => return "contact".to_string(),
+            "privacy" | "privacy-policy" | "terms" | "terms-of-service" |
+            "policy" | "policies" | "refund" | "refund-policy" |
+            "return" | "return-policy" | "shipping" | "shipping-policy" |
+            "legal" => return "policy".to_string(),
+            "blog" | "news" | "articles" => return "blog".to_string(),
+            _ => {},
+        }
+    }
+    if path.contains("/products/") || path.contains("/product/") || path.starts_with("/p/") || path.contains("/item/") {
+        return "product".to_string();
+    }
+    if path.contains("/collection") || path.contains("/category") || path.contains("/categories") {
+        return "collection".to_string();
+    }
     "other".to_string()
 }
 
 fn is_asset(url: &str) -> bool {
     let lower = url.to_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".css", ".js", ".json", ".xml", ".pdf", ".woff", ".woff2"]
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".avif",
+     ".css", ".js", ".mjs", ".json", ".xml", ".map",
+     ".pdf", ".zip", ".gz", ".tar", ".rar",
+     ".woff", ".woff2", ".ttf", ".eot", ".otf",
+     ".mp4", ".mp3", ".webm", ".ogg", ".wav",
+     ".csv", ".xlsx", ".doc", ".docx"]
         .iter().any(|ext| lower.ends_with(ext))
 }
 
@@ -195,11 +233,108 @@ fn is_low_value(url: &str) -> bool {
         .iter().any(|seg| path.contains(seg))
 }
 
+/// Lazy-compiled regexes for script/style stripping.
+static RE_SCRIPT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap()
+});
+static RE_STYLE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap()
+});
+static RE_SCRIPT_OPEN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)<script\b([^>]*)>").unwrap()
+});
+static RE_WHITESPACE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\s{2,}").unwrap()
+});
+
+/// Strip scripts and styles but preserve JSON-LD blocks which contain
+/// structured organization/product data critical for trust analysis.
 fn strip_scripts(html: &str) -> String {
-    let re_script = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
-    let re_style = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
-    let without_scripts = re_script.replace_all(html, " ");
-    let without_styles = re_style.replace_all(&without_scripts, " ");
-    let collapsed = regex::Regex::new(r"\s{2,}").unwrap().replace_all(&without_styles, " ");
-    collapsed.chars().take(12000).collect()
+    // Strip <style> first.
+    let without_styles = RE_STYLE.replace_all(html, " ");
+    
+    // Selectively strip <script> blocks, keeping ld+json.
+    let mut result = String::with_capacity(without_styles.len());
+    let mut last_end = 0;
+    
+    for mat in RE_SCRIPT.find_iter(&without_styles) {
+        result.push_str(&without_styles[last_end..mat.start()]);
+        let block = mat.as_str();
+        // Check if this script block is JSON-LD.
+        if let Some(open_m) = RE_SCRIPT_OPEN.find(block) {
+            let attrs = open_m.as_str().to_lowercase();
+            if attrs.contains("ld+json") {
+                result.push_str(block);  // keep JSON-LD
+            } else {
+                result.push(' ');
+            }
+        } else {
+            result.push(' ');
+        }
+        last_end = mat.end();
+    }
+    result.push_str(&without_styles[last_end..]);
+    
+    let collapsed = RE_WHITESPACE.replace_all(&result, " ");
+    collapsed.chars().take(20000).collect()
+}
+
+/// Known ccTLD second-level domains.
+const CCTLD_SECOND_LEVELS: &[&str] = &[
+    "co.uk", "org.uk", "ac.uk", "gov.uk",
+    "co.in", "net.in", "org.in",
+    "com.au", "net.au", "org.au",
+    "co.nz", "net.nz", "org.nz",
+    "co.za", "org.za",
+    "com.br", "net.br", "org.br",
+    "co.jp", "or.jp",
+    "co.kr", "or.kr",
+    "com.cn", "net.cn", "org.cn",
+    "com.tw", "net.tw",
+    "com.hk", "net.hk",
+    "com.sg", "net.sg",
+    "com.my", "net.my",
+    "co.id", "or.id",
+    "com.ph", "net.ph",
+    "co.th", "or.th",
+    "com.tr", "net.tr",
+    "com.mx", "net.mx",
+    "com.ar", "net.ar",
+    "com.co", "net.co",
+    "com.ua", "net.ua",
+    "com.pk", "net.pk",
+];
+
+/// Extract the registrable domain (eTLD+1) from a hostname.
+/// Handles ccTLD second-level domains like .co.uk, .com.au correctly.
+fn get_registrable_domain(host: &str) -> String {
+    let lower = host.to_lowercase();
+    let parts: Vec<&str> = lower.trim_end_matches('.').split('.').collect();
+    if parts.len() <= 2 {
+        return parts.join(".");
+    }
+    let last_two = format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
+    if CCTLD_SECOND_LEVELS.contains(&last_two.as_str()) {
+        if parts.len() >= 3 {
+            return format!("{}.{}", parts[parts.len() - 3], last_two);
+        }
+        return lower;
+    }
+    last_two
+}
+
+/// Normalize a URL for deduplication: lowercase host, strip fragment,
+/// normalize trailing slash.
+fn normalize_crawl_url(url: &str) -> String {
+    match Url::parse(url) {
+        Ok(mut u) => {
+            u.set_fragment(None);
+            let path = u.path().to_string();
+            if path.len() > 1 && path.ends_with('/') {
+                u.set_path(path.trim_end_matches('/'));
+            }
+            u.to_string()
+        }
+        Err(_) => url.to_string(),
+    }
 }

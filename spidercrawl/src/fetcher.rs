@@ -10,6 +10,7 @@ pub struct Fetcher {
 }
 
 pub struct FetchResult {
+    #[allow(dead_code)]
     pub url: String,
     pub final_url: Option<String>,
     pub status: Option<u16>,

@@ -1519,6 +1519,7 @@ dependencies = [
 name = "spidercrawl"
 version = "0.1.0"
 dependencies = [
+ "once_cell",
  "parking_lot",
  "pyo3",
  "regex",

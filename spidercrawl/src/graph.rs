@@ -39,6 +39,7 @@ impl LinkGraph {
         true
     }
 
+    #[allow(dead_code)]
     pub fn is_seen(&self, url: &str) -> bool {
         self.seen.lock().contains(url)
     }
