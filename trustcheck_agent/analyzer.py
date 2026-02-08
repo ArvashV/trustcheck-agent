@@ -1101,6 +1101,18 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 
         if req.advanced_crawl:
             from .spider_crawler import spider_crawl as do_spider_crawl
+            # Detect if the homepage redirected to a different host so the
+            # spider knows both domains are valid crawl targets.  Without this
+            # cross-platform redirects (e.g. shop.com → shop.myshopify.com)
+            # cause 0 links to be followed → only 1 page crawled.
+            redirect_host: str | None = None
+            try:
+                final_host = urlparse(base_url_for_crawl).hostname
+                if final_host and final_host != hostname:
+                    redirect_host = final_host
+            except Exception:
+                pass
+
             spider_result = do_spider_crawl(
                 start_url=base_url_for_crawl,
                 hostname=hostname,
@@ -1108,7 +1120,8 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                 user_agent=req.user_agent,
                 max_pages=30,
                 max_depth=3,
-                max_concurrent=20,
+                max_concurrent=8,
+                redirect_hostname=redirect_host,
             )
             crawl_info = CrawlInfo(
                 pages_requested=spider_result.pages_requested,
