@@ -1,9 +1,11 @@
 """
 AI-powered legitimacy judge using Google Gemini.
 This module uses Gemini to analyze crawled website content and determine trust scores.
+Supports multimodal analysis: text + screenshot vision via Gemini 3 code execution.
 """
 from __future__ import annotations
 
+import json as _json
 import os
 import re
 from typing import Any
@@ -228,8 +230,172 @@ Respond with ONLY valid JSON (no markdown, no code blocks):
 Be thorough. If you see impossible product claims (like non-invasive glucose meters for consumers), that's a MAJOR red flag - score should be under 30."""
 
 
-def _call_gemini(prompt: str, timeout: float = 30.0) -> dict[str, Any] | None:
-    """Call Gemini via the official google-genai SDK and parse JSON response."""
+# ---------------------------------------------------------------------------
+# Visual (multimodal) screenshot analysis via Gemini 3 code execution
+# ---------------------------------------------------------------------------
+
+_VISUAL_ANALYSIS_PROMPT = """You are a visual scam/trust analyst. You're given a screenshot of a website.
+Use your code execution capability to analyze the image programmatically:
+1. Examine the overall layout — does it look like a cheap template or professional design?
+2. Look for trust badges — are they generic/fake images or real verified widgets (Trustpilot, BBB, Norton)?
+3. Check for urgency elements — countdown timers, "only X left", flashing sale banners.
+4. Look for stock photo watermarks or suspiciously perfect product imagery.
+5. Check the header/footer — does it have complete navigation, contact info, proper branding?
+6. Examine text quality — blurry text, inconsistent fonts, overlapping elements.
+7. Look for popup/overlay patterns — aggressive email captures, fake "someone just bought" notifications.
+8. Check the color scheme and visual consistency.
+
+Write Python code to analyze the image structure, colors, text regions, and suspicious patterns.
+Then provide your analysis.
+
+You MUST return your final analysis in this exact JSON format (as plain text at the end):
+```json
+{
+  "visual_trust_score": <0-100>,
+  "layout_quality": "<professional|acceptable|poor|template_clone>",
+  "suspicious_elements": ["<list of visually suspicious things>"],
+  "trust_indicators": ["<list of positive visual signals>"],
+  "fake_badge_detected": <true|false>,
+  "urgency_visuals": <true|false>,
+  "stock_photo_suspected": <true|false>,
+  "popup_overlay_detected": <true|false>,
+  "visual_summary": "<One clear sentence about the site's visual trustworthiness>"
+}
+```"""
+
+
+def _normalize_visual_output(raw_text: str) -> dict[str, Any] | None:
+    """Parse the structured JSON from the visual analysis response."""
+    if not raw_text:
+        return None
+
+    # Try to find JSON block in the response
+    json_match = re.search(r'```json\s*\n?(.*?)```', raw_text, re.DOTALL)
+    if json_match:
+        candidate = json_match.group(1).strip()
+    else:
+        json_match = re.search(r'\{[^{}]*"visual_trust_score"[^{}]*\}', raw_text, re.DOTALL)
+        if json_match:
+            candidate = json_match.group(0)
+        else:
+            json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if json_match:
+                candidate = json_match.group(0)
+            else:
+                return None
+
+    try:
+        data = _json.loads(candidate)
+    except Exception:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    # Normalize fields
+    score = data.get("visual_trust_score")
+    if isinstance(score, (int, float)):
+        data["visual_trust_score"] = max(0, min(100, int(score)))
+    else:
+        data["visual_trust_score"] = 50
+
+    for list_key in ("suspicious_elements", "trust_indicators"):
+        val = data.get(list_key)
+        if not isinstance(val, list):
+            data[list_key] = []
+        else:
+            data[list_key] = [str(x) for x in val if x]
+
+    for bool_key in ("fake_badge_detected", "urgency_visuals", "stock_photo_suspected", "popup_overlay_detected"):
+        val = data.get(bool_key)
+        if not isinstance(val, bool):
+            data[bool_key] = False
+
+    allowed_layouts = {"professional", "acceptable", "poor", "template_clone"}
+    if data.get("layout_quality") not in allowed_layouts:
+        data["layout_quality"] = "acceptable"
+
+    if not isinstance(data.get("visual_summary"), str) or not data["visual_summary"].strip():
+        data["visual_summary"] = "Visual analysis completed."
+
+    return data
+
+
+def visual_analyze_screenshot(
+    screenshot_bytes: bytes,
+    url: str,
+    hostname: str,
+) -> dict[str, Any] | None:
+    """
+    Send a website screenshot to Gemini 3 for visual scam/trust analysis.
+
+    Uses Gemini's code_execution tool so the model can programmatically
+    inspect the image (pixel analysis, color distribution, text detection).
+    Returns structured visual trust signals or None on failure.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key or not screenshot_bytes:
+        return None
+
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception as exc:
+        print(f"google-genai not available for visual analysis: {exc}")
+        return None
+
+    try:
+        client = genai.Client(api_key=api_key)
+
+        image_part = types.Part.from_bytes(
+            data=screenshot_bytes,
+            mime_type="image/png",
+        )
+
+        prompt_text = (
+            f"Analyze this screenshot of {url} (hostname: {hostname}).\n\n"
+            + _VISUAL_ANALYSIS_PROMPT
+        )
+
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(code_execution=types.ToolCodeExecution())],
+            temperature=0.2,
+            max_output_tokens=8192,
+        )
+
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[image_part, prompt_text],
+            config=config,
+        )
+
+        # Extract text from all parts (code execution returns multiple parts)
+        full_text = ""
+        if resp.candidates:
+            for part in (resp.candidates[0].content.parts or []):
+                if hasattr(part, "text") and part.text:
+                    full_text += part.text + "\n"
+
+        if not full_text.strip():
+            return None
+
+        return _normalize_visual_output(full_text)
+
+    except Exception as exc:
+        print(f"Visual screenshot analysis failed: {exc}")
+        return None
+
+
+def _call_gemini(
+    prompt: str,
+    timeout: float = 30.0,
+    screenshot_bytes: bytes | None = None,
+) -> dict[str, Any] | None:
+    """Call Gemini via the official google-genai SDK and parse JSON response.
+
+    When *screenshot_bytes* is provided the image is sent alongside the text
+    prompt, giving Gemini multimodal context about the website's appearance.
+    """
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
@@ -244,12 +410,15 @@ def _call_gemini(prompt: str, timeout: float = 30.0) -> dict[str, Any] | None:
     try:
         client = genai.Client(api_key=api_key)
 
-        contents = [
-            types.Content(
-                role="user",
-                parts=[types.Part.from_text(text=prompt)],
+        # Build content parts — optional image + text
+        parts: list[types.Part] = []
+        if screenshot_bytes:
+            parts.append(
+                types.Part.from_bytes(data=screenshot_bytes, mime_type="image/png")
             )
-        ]
+        parts.append(types.Part.from_text(text=prompt))
+
+        contents = [types.Content(role="user", parts=parts)]
 
         tools = [types.Tool(googleSearch=types.GoogleSearch())]
 
@@ -281,9 +450,7 @@ def _call_gemini(prompt: str, timeout: float = 30.0) -> dict[str, Any] | None:
             text = text[:-3]
         text = text.strip()
 
-        import json
-
-        return json.loads(text)
+        return _json.loads(text)
     except Exception as e:
         print(f"Gemini call failed: {e}")
         return None
@@ -477,9 +644,14 @@ def judge_website(
     crawled_pages: list[dict[str, Any]] | None,
     external_reviews: str | None = None,
     structured_signals: dict[str, Any] | None = None,
+    screenshot_bytes: bytes | None = None,
 ) -> dict[str, Any] | None:
     """
     Use Gemini to judge the website's legitimacy.
+
+    When *screenshot_bytes* is provided, the homepage screenshot is sent as a
+    multimodal image alongside the text prompt so Gemini can visually inspect
+    layout, badges, and design quality.
     Returns AI analysis result or None if failed.
     """
     # Detect platform (best-effort fingerprint)
@@ -525,6 +697,23 @@ def judge_website(
     }
 
     prompt = _build_prompt(site_data)
-    result = _call_gemini(prompt)
+
+    # When a screenshot is available, add visual context instructions to the
+    # prompt so the model knows to incorporate visual observations.
+    if screenshot_bytes:
+        prompt += (
+            "\n\n--- VISUAL CONTEXT ---\n"
+            "A screenshot of the website homepage is attached.  Factor your visual "
+            "observations into the scoring.  Look for:\n"
+            "- Cheap template design / poor layout\n"
+            "- Generic or fake trust badges\n"
+            "- Countdown timers / urgency banners\n"
+            "- Stock-photo product images\n"
+            "- Popup overlays / aggressive captures\n"
+            "- Professional branding vs amateur design\n"
+            "Adjust the legitimacy_score up or down based on what you see."
+        )
+
+    result = _call_gemini(prompt, screenshot_bytes=screenshot_bytes)
     normalized = _normalize_ai_output(result)
     return normalized

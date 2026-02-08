@@ -94,6 +94,7 @@ class AnalyzeResponse(BaseModel):
     # AI judgment
     ai_judgment: AIJudgment | None = None
     external_reviews: str | None = None
+    visual_analysis: dict[str, Any] | None = None
 
     # metadata
     agent: Literal["python"] = "python"

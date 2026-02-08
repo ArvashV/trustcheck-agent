@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 
 import httpx
 
-from .ai_judge import fetch_external_reviews, judge_website
+from .ai_judge import fetch_external_reviews, judge_website, visual_analyze_screenshot
 from .models import AIJudgment, AnalyzeRequest, AnalyzeResponse, CrawlInfo, CrawlPage, ExplainabilityItem, FetchInfo, TLSInfo, Verdict
 
 
@@ -1416,6 +1416,39 @@ def _price_anomaly_signals(html: str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Screenshot capture bridge (async → sync)
+# ---------------------------------------------------------------------------
+
+def _capture_screenshot_sync(url: str, timeout_ms: int = 12000) -> bytes | None:
+    """Capture a PNG screenshot via Playwright, bridging async → sync.
+
+    Returns raw PNG bytes or *None* on any failure (Playwright not installed,
+    browser crash, timeout, etc.).  Designed to run inside a ThreadPoolExecutor.
+    """
+    import asyncio
+
+    try:
+        from .screenshot import capture_screenshot
+    except Exception:
+        return None
+
+    async def _run():
+        result = await capture_screenshot(url, timeout_ms=timeout_ms)
+        return result.data if result else None
+
+    try:
+        # Create a fresh event loop for the thread – safe inside a pool thread.
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+    except Exception as exc:
+        print(f"Screenshot capture failed: {exc}")
+        return None
+
+
 def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     t0 = time.perf_counter()
 
@@ -1434,19 +1467,21 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         finally:
             timings[name] = int((time.perf_counter() - start) * 1000)
 
-    # Parallel fetch: RDAP, HTTP signals, TLS, robots.txt
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    # Parallel fetch: RDAP, HTTP signals, TLS, robots.txt, screenshot
+    with ThreadPoolExecutor(max_workers=7) as pool:
         futures = {
             pool.submit(timed, "rdap", lambda: _fetch_rdap_domain_age_days(hostname, req.timeout_ms)): "rdap",
             pool.submit(timed, "fetch", lambda: _fetch_http_signals(normalized_url, req.timeout_ms, req.max_html_kb, req.user_agent)): "fetch",
             pool.submit(timed, "tls", lambda: _tls_info(hostname, req.timeout_ms)): "tls",
             pool.submit(timed, "robots", lambda: _fetch_robots_txt_signals(hostname, req.timeout_ms, req.user_agent)): "robots",
+            pool.submit(timed, "screenshot", lambda: _capture_screenshot_sync(normalized_url, req.timeout_ms)): "screenshot",
         }
 
         domain_age_days: int | None = None
         fetch: FetchInfo | None = None
         tls: TLSInfo | None = None
         robots_signals: dict[str, Any] = {}
+        screenshot_bytes: bytes | None = None
 
         for fut in as_completed(futures):
             name = futures[fut]
@@ -1463,6 +1498,8 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                 tls = value
             elif name == "robots":
                 robots_signals = value or {}
+            elif name == "screenshot":
+                screenshot_bytes = value
 
     if fetch is None:
         fetch = FetchInfo(
@@ -2104,20 +2141,110 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         ))
 
     # AI Judgment - PRIMARY scoring mechanism
+    # Run visual analysis and main AI judge in parallel for speed.
     ai_judgment: AIJudgment | None = None
+    visual_result: dict[str, Any] | None = None
     crawled_pages_data = [p.model_dump() for p in (crawl_info.pages if crawl_info else [])]
 
-    ai_result = judge_website(
-        url=normalized_url,
-        hostname=hostname,
-        domain_age_days=domain_age_days,
-        is_well_known=is_well_known,
-        http_status=fetch.http_status,
-        homepage_html=fetch.html_snippet,
-        crawled_pages=crawled_pages_data,
-        external_reviews=external_reviews_text,
-        structured_signals=structured_signals,
-    )
+    def _run_main_judge():
+        return judge_website(
+            url=normalized_url,
+            hostname=hostname,
+            domain_age_days=domain_age_days,
+            is_well_known=is_well_known,
+            http_status=fetch.http_status,
+            homepage_html=fetch.html_snippet,
+            crawled_pages=crawled_pages_data,
+            external_reviews=external_reviews_text,
+            structured_signals=structured_signals,
+            screenshot_bytes=screenshot_bytes,
+        )
+
+    def _run_visual_analysis():
+        if not screenshot_bytes:
+            return None
+        return visual_analyze_screenshot(screenshot_bytes, normalized_url, hostname)
+
+    with ThreadPoolExecutor(max_workers=2) as ai_pool:
+        judge_fut = ai_pool.submit(timed, "ai_judge", _run_main_judge)
+        visual_fut = ai_pool.submit(timed, "visual_analysis", _run_visual_analysis)
+        ai_result = judge_fut.result()
+        visual_result = visual_fut.result()
+
+    # Merge visual analysis into structured signals
+    if visual_result:
+        structured_signals["visual_analysis"] = visual_result
+
+    # ── Visual analysis explainability items ──────────────────────
+    if visual_result:
+        try:
+            vts = visual_result.get("visual_trust_score", 50)
+            layout_q = visual_result.get("layout_quality", "acceptable")
+            visual_summary = visual_result.get("visual_summary", "")
+
+            # Main visual verdict
+            if vts >= 70:
+                v_verdict: Verdict = "good"
+            elif vts >= 40:
+                v_verdict = "warn"
+            else:
+                v_verdict = "bad"
+
+            explainability.append(ExplainabilityItem(
+                key="visualAnalysis",
+                label="Visual scam detection",
+                verdict=v_verdict,
+                detail=f"Visual trust score: {vts}/100 • Layout: {layout_q}. {visual_summary}",
+            ))
+
+            # Specific visual red flags
+            suspicious = visual_result.get("suspicious_elements", [])
+            if suspicious:
+                explainability.append(ExplainabilityItem(
+                    key="visualRedFlags",
+                    label="Visual red flags",
+                    verdict="bad" if len(suspicious) >= 3 else "warn",
+                    detail=f"Suspicious visual elements: {', '.join(suspicious[:5])}",
+                ))
+
+            if visual_result.get("fake_badge_detected"):
+                explainability.append(ExplainabilityItem(
+                    key="fakeBadgeVisual",
+                    label="Fake trust badge (visual)",
+                    verdict="bad",
+                    detail="Visual analysis detected fake or generic trust badges in the screenshot.",
+                ))
+
+            if visual_result.get("urgency_visuals"):
+                explainability.append(ExplainabilityItem(
+                    key="urgencyVisual",
+                    label="Urgency visuals detected",
+                    verdict="warn",
+                    detail="Screenshot shows countdown timers, urgency banners, or 'limited stock' visual elements.",
+                ))
+
+            if visual_result.get("popup_overlay_detected"):
+                explainability.append(ExplainabilityItem(
+                    key="popupOverlay",
+                    label="Aggressive popups",
+                    verdict="warn",
+                    detail="Screenshot shows popup overlays or aggressive email/notification captures.",
+                ))
+
+            # Positive visual signals
+            trust_indicators = visual_result.get("trust_indicators", [])
+            if trust_indicators:
+                explainability.append(ExplainabilityItem(
+                    key="visualPositive",
+                    label="Visual trust signals",
+                    verdict="good",
+                    detail=f"Positive visual indicators: {', '.join(trust_indicators[:5])}",
+                ))
+        except Exception:
+            pass
+    elif screenshot_bytes:
+        # Screenshot was captured but visual analysis failed
+        warnings.append("Visual analysis: screenshot captured but Gemini visual analysis failed")
 
     if ai_result:
         try:
@@ -2213,6 +2340,26 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         if "generic_trust_badge" in social_proof and not any(w in social_proof for w in ("trustpilot", "bbb", "google_reviews")):
             score -= 3
 
+        # ── VISUAL ANALYSIS score adjustments ────────────────────
+        if visual_result:
+            vts = visual_result.get("visual_trust_score", 50)
+            # Blend: if visual score disagrees strongly with text score, nudge
+            if vts <= 30 and score >= 60:
+                score -= 10  # visuals scream scam, text looks ok → lower
+            elif vts >= 75 and score <= 40:
+                score += 5   # visuals professional, but text signals bad → small bump
+            # Specific penalties/bonuses
+            if visual_result.get("fake_badge_detected"):
+                score -= 5
+            if visual_result.get("urgency_visuals"):
+                score -= 4
+            if visual_result.get("popup_overlay_detected"):
+                score -= 3
+            if visual_result.get("layout_quality") == "template_clone":
+                score -= 4
+            elif visual_result.get("layout_quality") == "professional":
+                score += 3
+
         final_score = _clamp_score(score)
     else:
         # Fallback heuristic
@@ -2263,6 +2410,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         crawl=crawl_info,
         ai_judgment=ai_judgment,
         external_reviews=external_reviews_text,
+        visual_analysis=visual_result,
         analyzed_at=datetime.now(timezone.utc).isoformat(),
         timings_ms=timings,
         warnings=warnings,
