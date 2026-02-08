@@ -19,17 +19,55 @@ from .models import AIJudgment, AnalyzeRequest, AnalyzeResponse, CrawlInfo, Craw
 
 
 _WELL_KNOWN_DOMAINS = {
-    "amazon.com",
-    "google.com",
-    "microsoft.com",
-    "apple.com",
-    "github.com",
-    "wikipedia.org",
-    "paypal.com",
-    "stripe.com",
-    "netflix.com",
-    "linkedin.com",
-    "reddit.com",
+    # Tech giants
+    "amazon.com", "google.com", "microsoft.com", "apple.com", "meta.com",
+    "facebook.com", "instagram.com", "whatsapp.com", "youtube.com",
+    "twitter.com", "x.com", "tiktok.com", "snapchat.com", "pinterest.com",
+    "linkedin.com", "reddit.com", "github.com", "gitlab.com",
+    "stackoverflow.com", "discord.com", "twitch.tv", "spotify.com",
+    # Streaming / entertainment
+    "netflix.com", "hulu.com", "disneyplus.com", "primevideo.com",
+    "imdb.com", "rottentomatoes.com",
+    # E-commerce
+    "ebay.com", "walmart.com", "target.com", "bestbuy.com", "costco.com",
+    "homedepot.com", "lowes.com", "macys.com", "nordstrom.com",
+    "wayfair.com", "etsy.com", "zappos.com", "newegg.com",
+    "kohls.com", "sephora.com", "ulta.com",
+    "nike.com", "adidas.com", "zara.com", "hm.com", "uniqlo.com",
+    "asos.com", "ikea.com", "aliexpress.com", "alibaba.com", "temu.com",
+    # Finance / Payments
+    "paypal.com", "stripe.com", "chase.com", "bankofamerica.com",
+    "wellsfargo.com", "capitalone.com", "amex.com",
+    "discover.com", "venmo.com", "wise.com",
+    "coinbase.com", "robinhood.com", "fidelity.com",
+    # News / media
+    "bbc.com", "bbc.co.uk", "cnn.com", "nytimes.com",
+    "theguardian.com", "reuters.com", "bloomberg.com",
+    "forbes.com", "wsj.com", "huffpost.com",
+    # Reference / education
+    "wikipedia.org", "wikimedia.org", "britannica.com",
+    "coursera.org", "udemy.com", "khanacademy.org",
+    # Cloud / Dev tools
+    "cloudflare.com", "digitalocean.com", "vercel.com", "netlify.com",
+    "docker.com", "npmjs.com",
+    # Hosting / CMS platforms
+    "godaddy.com", "namecheap.com", "squarespace.com",
+    "wix.com", "wordpress.com", "shopify.com", "bigcommerce.com",
+    # Delivery / Shipping
+    "usps.com", "ups.com", "fedex.com", "dhl.com",
+    # Travel
+    "booking.com", "airbnb.com", "expedia.com", "tripadvisor.com",
+    # Food / delivery
+    "doordash.com", "ubereats.com", "grubhub.com", "instacart.com",
+    # Health
+    "webmd.com", "mayoclinic.org", "healthline.com",
+    "cvs.com", "walgreens.com",
+    # Communication / Productivity
+    "zoom.us", "adobe.com", "dropbox.com", "salesforce.com",
+    "slack.com", "notion.so", "canva.com", "figma.com",
+    # Community / Reviews
+    "craigslist.org", "yelp.com", "quora.com",
+    "medium.com", "substack.com", "trustpilot.com",
 }
 
 
@@ -49,6 +87,74 @@ _KNOWN_TLS_ISSUER_HINTS = (
     "entrust",
     "idenTrust".lower(),
 )
+
+
+# Known hosting/platform domains — redirects TO these are normal, not phishing.
+_KNOWN_HOSTING_PLATFORMS: dict[str, str] = {
+    "myshopify.com": "Shopify", "shopify.com": "Shopify",
+    "squarespace.com": "Squarespace", "sqsp.com": "Squarespace",
+    "wix.com": "Wix", "wixsite.com": "Wix",
+    "weebly.com": "Weebly",
+    "bigcommerce.com": "BigCommerce", "mybigcommerce.com": "BigCommerce",
+    "wordpress.com": "WordPress",
+    "godaddysites.com": "GoDaddy",
+    "square.site": "Square", "squareup.com": "Square",
+    "carrd.co": "Carrd",
+    "webflow.io": "Webflow",
+    "netlify.app": "Netlify",
+    "vercel.app": "Vercel",
+    "herokuapp.com": "Heroku",
+    "azurewebsites.net": "Azure",
+    "web.app": "Firebase", "firebaseapp.com": "Firebase",
+    "github.io": "GitHub Pages", "gitlab.io": "GitLab Pages",
+    "bigcartel.com": "Big Cartel",
+    "ecwid.com": "Ecwid",
+    "volusion.com": "Volusion",
+    "prestashop.com": "PrestaShop",
+}
+
+# Social media URL patterns
+_SOCIAL_MEDIA_PATTERNS: dict[str, re.Pattern] = {
+    "facebook": re.compile(r"https?://(?:www\.)?facebook\.com/[^\"'\s>]+", re.IGNORECASE),
+    "instagram": re.compile(r"https?://(?:www\.)?instagram\.com/[^\"'\s>]+", re.IGNORECASE),
+    "twitter": re.compile(r"https?://(?:www\.)?(?:twitter\.com|x\.com)/[^\"'\s>]+", re.IGNORECASE),
+    "tiktok": re.compile(r"https?://(?:www\.)?tiktok\.com/@[^\"'\s>]+", re.IGNORECASE),
+    "youtube": re.compile(r"https?://(?:www\.)?youtube\.com/(?:@|channel/|c/)[^\"'\s>]+", re.IGNORECASE),
+    "linkedin": re.compile(r"https?://(?:www\.)?linkedin\.com/(?:company|in)/[^\"'\s>]+", re.IGNORECASE),
+    "pinterest": re.compile(r"https?://(?:www\.)?pinterest\.com/[^\"'\s>]+", re.IGNORECASE),
+}
+
+# Phone number pattern (broad — post-filtered)
+_PHONE_RE = re.compile(
+    r"(?:\+\d{1,3}[\s.-]?)?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}"
+)
+
+# Payment provider fingerprints in HTML
+_PAYMENT_INDICATORS: dict[str, tuple[str, ...]] = {
+    "stripe": ("stripe.com", "stripe.js", "stripe-js", "pk_live_", "pk_test_"),
+    "paypal": ("paypal.com", "paypal-sdk", "paypal.Buttons", "paypal-button"),
+    "square": ("squareup.com", "square-payment", "sq-payment"),
+    "shopify_payments": ("shopify-payment", "shopifypay"),
+    "klarna": ("klarna.com", "klarna-widget", "klarna-placement"),
+    "afterpay": ("afterpay.com", "afterpay-widget"),
+    "affirm": ("affirm.com", "affirm-js"),
+    "apple_pay": ("apple-pay", "ApplePaySession"),
+    "google_pay": ("google-pay", "GooglePayButton", "gpay"),
+}
+
+# Urgency / pressure manipulation patterns
+_URGENCY_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"(?:only|just)\s+\d+\s+left", re.I), "low stock pressure"),
+    (re.compile(r"\d+\s+people?\s+(?:are\s+)?(?:viewing|watching|looking)", re.I), "fake viewer count"),
+    (re.compile(r"(?:limited\s+time|ends?\s+(?:soon|today|tonight|in\s+\d))", re.I), "time pressure"),
+    (re.compile(r"(?:flash\s+sale|mega\s+sale|clearance\s+sale|going\s+fast)", re.I), "sale urgency"),
+    (re.compile(r"(?:don'?t\s+miss|act\s+now|hurry|rush|grab\s+(?:it|yours))", re.I), "urgency language"),
+    (re.compile(r"(?:today\s+only|24.?hour|48.?hour)\s+(?:deal|sale|offer|discount)", re.I), "time-limited offer"),
+    (re.compile(r"\b(?:69|79|89|9[0-9])%\s*off\b", re.I), "extreme discount claim"),
+    (re.compile(r"(?:free\s+shipping\s+(?:worldwide|on\s+all|for\s+all))", re.I), "free global shipping claim"),
+    (re.compile(r"countdown|timer|data-countdown|\.countdown", re.I), "countdown timer"),
+    (re.compile(r"(?:sold\s+out\s+soon|selling\s+fast|almost\s+gone)", re.I), "scarcity pressure"),
+]
 
 
 def _clamp_score(score: int) -> int:
@@ -662,6 +768,14 @@ def _redirect_verdict_and_detail(initial_url: str, fetch: FetchInfo) -> tuple[Ve
     final_reg = _registrable_domain_or_host(final_host)
 
     if initial_reg and final_reg and initial_reg != final_reg:
+        # Check if the redirect target is a known hosting platform
+        is_hosting, platform_name = _is_known_hosting_redirect(final_host)
+        if is_hosting:
+            return (
+                "warn",
+                f"Homepage redirected to {platform_name} hosting ({final_host}). "
+                f"This is normal for sites hosted on {platform_name}.",
+            )
         return (
             "bad",
             f"Homepage redirected {len(chain)} time(s) and ended on a different domain ({final_host}). This is a common phishing/scam pattern.",
@@ -1037,6 +1151,271 @@ def _tls_info(hostname: str, timeout_ms: int) -> TLSInfo:
         return TLSInfo(supported=False)
 
 
+# ── NEW: Rich signal extraction functions ────────────────────────────
+
+def _is_known_hosting_redirect(final_host: str) -> tuple[bool, str]:
+    """Check if a host belongs to a known hosting/e-commerce platform."""
+    h = final_host.lower()
+    for platform_domain, platform_name in _KNOWN_HOSTING_PLATFORMS.items():
+        if h == platform_domain or h.endswith("." + platform_domain):
+            return True, platform_name
+    return False, ""
+
+
+def _extract_social_media_links(html: str) -> dict[str, list[str]]:
+    """Extract social media profile links from HTML."""
+    if not html:
+        return {}
+    results: dict[str, list[str]] = {}
+    for platform, pattern in _SOCIAL_MEDIA_PATTERNS.items():
+        matches = pattern.findall(html)
+        unique: list[str] = []
+        seen: set[str] = set()
+        for url in matches:
+            clean = url.rstrip('/"\'')
+            clean = clean.split('?')[0]
+            if clean not in seen and len(clean) > 20:
+                seen.add(clean)
+                unique.append(clean)
+        if unique:
+            results[platform] = unique[:3]
+    return results
+
+
+def _extract_phone_numbers(html: str) -> list[str]:
+    """Extract likely phone numbers from HTML."""
+    if not html:
+        return []
+    # Work on text content (strip tags)
+    text = re.sub(r"<[^>]+>", " ", html)
+    candidates = _PHONE_RE.findall(text)
+    phones: list[str] = []
+    seen: set[str] = set()
+    for p in candidates:
+        p = p.strip()
+        digits = re.sub(r"\D", "", p)
+        if len(digits) < 7 or len(digits) > 15:
+            continue
+        if digits in seen:
+            continue
+        seen.add(digits)
+        phones.append(p)
+    return phones[:10]
+
+
+def _detect_payment_providers(html: str) -> list[str]:
+    """Detect payment providers/processors referenced in HTML."""
+    if not html:
+        return []
+    h = html.lower()
+    found: list[str] = []
+    for provider, indicators in _PAYMENT_INDICATORS.items():
+        if any(ind.lower() in h for ind in indicators):
+            found.append(provider)
+    return found
+
+
+def _check_meta_completeness(html: str) -> dict[str, Any]:
+    """Check for proper meta/link tags — legitimate sites usually have most."""
+    if not html:
+        return {"score": 0, "present": 0, "total": 9, "missing": ["all"], "checks": {}}
+    checks = {
+        "description": bool(re.search(r'<meta\s[^>]*name=["\']description["\'][^>]*>', html, re.I)),
+        "og_title": bool(re.search(r'<meta\s[^>]*property=["\']og:title["\'][^>]*>', html, re.I)),
+        "og_description": bool(re.search(r'<meta\s[^>]*property=["\']og:description["\'][^>]*>', html, re.I)),
+        "og_image": bool(re.search(r'<meta\s[^>]*property=["\']og:image["\'][^>]*>', html, re.I)),
+        "viewport": bool(re.search(r'<meta\s[^>]*name=["\']viewport["\'][^>]*>', html, re.I)),
+        "charset": bool(re.search(r'<meta\s[^>]*charset=', html, re.I)),
+        "favicon": bool(re.search(r'<link\s[^>]*rel=["\'](?:icon|shortcut icon|apple-touch-icon)["\'][^>]*>', html, re.I)),
+        "title_tag": bool(re.search(r'<title[^>]*>[^<]+</title>', html, re.I)),
+        "canonical": bool(re.search(r'<link\s[^>]*rel=["\']canonical["\'][^>]*>', html, re.I)),
+    }
+    present = sum(1 for v in checks.values() if v)
+    total = len(checks)
+    missing = [k for k, v in checks.items() if not v]
+    return {"score": int((present / total) * 100), "present": present, "total": total, "missing": missing, "checks": checks}
+
+
+def _extract_copyright_year(html: str) -> int | None:
+    """Extract the most recent copyright year from HTML."""
+    if not html:
+        return None
+    years = re.findall(r"\u00a9\s*(20\d{2})", html)  # © symbol
+    if not years:
+        years = re.findall(r"©\s*(20\d{2})", html)
+    if not years:
+        years = re.findall(r"copyright\s*(?:\u00a9?\s*)?(\d{4})", html, re.I)
+    if not years:
+        return None
+    int_years = [int(y) for y in years if 2000 <= int(y) <= 2030]
+    return max(int_years) if int_years else None
+
+
+def _detect_urgency_pressure(html: str) -> list[str]:
+    """Detect urgency/scarcity/pressure manipulation tactics."""
+    if not html:
+        return []
+    text = re.sub(r"<[^>]+>", " ", html)
+    found: list[str] = []
+    seen_types: set[str] = set()
+    for pattern, tactic_type in _URGENCY_PATTERNS:
+        if tactic_type in seen_types:
+            continue
+        if pattern.search(text):
+            found.append(tactic_type)
+            seen_types.add(tactic_type)
+    return found
+
+
+def _detect_social_proof_widgets(html: str) -> list[str]:
+    """Detect embedded third-party trust/review widgets in HTML."""
+    if not html:
+        return []
+    h = html.lower()
+    widgets: list[str] = []
+    if "trustpilot" in h or "tp-widget" in h:
+        widgets.append("trustpilot")
+    if "bbb.org" in h or "bbb-seal" in h or "better business bureau" in h:
+        widgets.append("bbb")
+    if "mcafee" in h and "secure" in h:
+        widgets.append("mcafee_secure")
+    if "norton" in h and ("secured" in h or "seal" in h):
+        widgets.append("norton_secured")
+    if "google-reviews" in h or "google.com/maps" in h:
+        widgets.append("google_reviews")
+    if "judge.me" in h or "judgeme" in h:
+        widgets.append("judge_me")
+    if "stamped.io" in h or "stamped-reviews" in h:
+        widgets.append("stamped")
+    if "yotpo" in h:
+        widgets.append("yotpo")
+    if "loox" in h and "review" in h:
+        widgets.append("loox")
+    if "sitejabber" in h:
+        widgets.append("sitejabber")
+    if "shopper approved" in h or "shopperapproved" in h:
+        widgets.append("shopper_approved")
+    # Generic/fake trust badges (common on scam sites)
+    if "trust-badge" in h or "trustbadge" in h or "safe-checkout" in h or "guaranteed-safe" in h:
+        widgets.append("generic_trust_badge")
+    return widgets
+
+
+def _analyze_outbound_links(html: str, hostname: str) -> dict[str, Any]:
+    """Analyze where outbound (external) links point."""
+    if not html:
+        return {"count": 0, "unique_domains": 0, "top_domains": []}
+    own_domain = _registrable_domain_guess(hostname.lower())
+    external_domains: dict[str, int] = {}
+    for _, href in _HREF_RE.findall(html):
+        href = (href or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        try:
+            p = urlparse(href)
+            if p.scheme not in ("http", "https") or not p.hostname:
+                continue
+            link_domain = _registrable_domain_guess(p.hostname.lower())
+            if link_domain == own_domain:
+                continue
+            external_domains[link_domain] = external_domains.get(link_domain, 0) + 1
+        except Exception:
+            continue
+    sorted_domains = sorted(external_domains.items(), key=lambda kv: kv[1], reverse=True)
+    return {
+        "count": sum(external_domains.values()),
+        "unique_domains": len(external_domains),
+        "top_domains": [{"domain": d, "count": c} for d, c in sorted_domains[:10]],
+    }
+
+
+def _fetch_robots_txt_signals(hostname: str, timeout_ms: int, user_agent: str) -> dict[str, Any]:
+    """Fetch and analyze robots.txt for suspicious patterns."""
+    timeout = timeout_ms / 1000
+    url = f"https://{hostname}/robots.txt"
+    try:
+        with httpx.Client(timeout=min(timeout, 5), follow_redirects=True) as client:
+            res = client.get(url, headers={"user-agent": user_agent})
+        if res.status_code == 404:
+            return {"exists": False, "note": "No robots.txt"}
+        if res.status_code != 200:
+            return {"exists": False, "note": f"robots.txt status {res.status_code}"}
+        text = res.text[:5000]
+        lines = text.strip().split("\n")
+        disallow_all = any(re.match(r"^\s*Disallow\s*:\s*/\s*$", ln, re.I) for ln in lines)
+        has_sitemap = any("sitemap" in ln.lower() for ln in lines)
+        disallow_count = sum(1 for ln in lines if ln.strip().lower().startswith("disallow"))
+        return {
+            "exists": True,
+            "disallow_all": disallow_all,
+            "has_sitemap_ref": has_sitemap,
+            "disallow_count": disallow_count,
+            "suspicious": disallow_all and not has_sitemap,
+        }
+    except Exception:
+        return {"exists": False, "note": "Could not fetch robots.txt"}
+
+
+def _detect_cookie_consent(html: str) -> bool:
+    """Detect cookie consent / GDPR compliance indicators."""
+    if not html:
+        return False
+    h = html.lower()
+    indicators = (
+        "cookie-consent", "cookie-banner", "cookie-notice", "cookie-popup",
+        "cookieconsent", "cookie_consent", "gdpr", "ccpa",
+        "onetrust", "cookiebot", "cookie-law", "cookie-policy",
+        "accept cookies", "accept all cookies", "cookie preferences",
+        "js-cookie-consent",
+    )
+    return any(ind in h for ind in indicators)
+
+
+def _price_anomaly_signals(html: str) -> dict[str, Any]:
+    """Detect suspicious pricing patterns."""
+    if not html:
+        return {"found": False}
+    text = re.sub(r"<[^>]+>", " ", html)
+    price_pattern = re.compile(
+        r"(?:(?:\$|\u00a3|\u20ac|USD|GBP|EUR)\s?)(\d{1,6}(?:[.,]\d{2})?)", re.I
+    )
+    prices: list[float] = []
+    for m in price_pattern.finditer(text):
+        try:
+            price = float(m.group(1).replace(",", ""))
+            if 0.01 <= price <= 100000:
+                prices.append(price)
+        except Exception:
+            continue
+    if len(prices) < 3:
+        return {"found": False, "price_count": len(prices)}
+    avg_price = sum(prices) / len(prices)
+    compare_pattern = re.compile(
+        r"(?:compare\s+at|was|regular\s+price|original|retail)\s*[\$\u00a3\u20ac]?\s*(\d+(?:\.\d{2})?)", re.I
+    )
+    compare_prices = []
+    for m in compare_pattern.finditer(text):
+        try:
+            compare_prices.append(float(m.group(1).replace(",", "")))
+        except Exception:
+            continue
+    extreme_discounts = 0
+    if compare_prices and prices:
+        for cp in compare_prices:
+            for p in prices:
+                if cp > 0 and p < cp and (cp - p) / cp > 0.80:
+                    extreme_discounts += 1
+    return {
+        "found": True,
+        "price_count": len(prices),
+        "avg_price": round(avg_price, 2),
+        "min_price": round(min(prices), 2),
+        "max_price": round(max(prices), 2),
+        "extreme_discounts": extreme_discounts,
+        "has_compare_pricing": len(compare_prices) > 0,
+    }
+
+
 def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     t0 = time.perf_counter()
 
@@ -1055,17 +1434,19 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         finally:
             timings[name] = int((time.perf_counter() - start) * 1000)
 
-    # Parallel fetch: RDAP, HTTP signals, TLS
+    # Parallel fetch: RDAP, HTTP signals, TLS, robots.txt
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {
             pool.submit(timed, "rdap", lambda: _fetch_rdap_domain_age_days(hostname, req.timeout_ms)): "rdap",
             pool.submit(timed, "fetch", lambda: _fetch_http_signals(normalized_url, req.timeout_ms, req.max_html_kb, req.user_agent)): "fetch",
             pool.submit(timed, "tls", lambda: _tls_info(hostname, req.timeout_ms)): "tls",
+            pool.submit(timed, "robots", lambda: _fetch_robots_txt_signals(hostname, req.timeout_ms, req.user_agent)): "robots",
         }
 
         domain_age_days: int | None = None
         fetch: FetchInfo | None = None
         tls: TLSInfo | None = None
+        robots_signals: dict[str, Any] = {}
 
         for fut in as_completed(futures):
             name = futures[fut]
@@ -1080,6 +1461,8 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                 fetch = value
             elif name == "tls":
                 tls = value
+            elif name == "robots":
+                robots_signals = value or {}
 
     if fetch is None:
         fetch = FetchInfo(
@@ -1093,6 +1476,19 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
 
     ecommerce_signals = _ecommerce_signals(fetch.html_snippet)
     detected_platform = _detect_platform_from_html(fetch.html_snippet)
+
+    # ── Extract rich signals from homepage HTML ─────────────────────
+    homepage_html = fetch.html_snippet or ""
+    social_links = _extract_social_media_links(homepage_html)
+    phone_numbers = _extract_phone_numbers(homepage_html)
+    payment_providers = _detect_payment_providers(homepage_html)
+    meta_info = _check_meta_completeness(homepage_html)
+    copyright_year = _extract_copyright_year(homepage_html)
+    urgency_tactics = _detect_urgency_pressure(homepage_html)
+    social_proof = _detect_social_proof_widgets(homepage_html)
+    outbound_links = _analyze_outbound_links(homepage_html, hostname)
+    has_cookie_consent = _detect_cookie_consent(homepage_html)
+    price_signals = _price_anomaly_signals(homepage_html)
 
     # Crawl internal links for AI context
     crawl_info: CrawlInfo | None = None
@@ -1220,6 +1616,59 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             crawl_info = CrawlInfo(pages_requested=len(links[:target_count]), pages_fetched=pages_fetched, pages=pages, crawl_mode="basic")
     except Exception:
         crawl_info = None
+
+    # ── Accumulate signals from crawled pages ────────────────────
+    if crawl_info and crawl_info.pages:
+        for cp in crawl_info.pages[:20]:
+            if not cp.html_snippet:
+                continue
+            for platform, links in _extract_social_media_links(cp.html_snippet).items():
+                if platform not in social_links:
+                    social_links[platform] = []
+                for lnk in links:
+                    if lnk not in social_links[platform]:
+                        social_links[platform].append(lnk)
+            for pn in _extract_phone_numbers(cp.html_snippet):
+                if pn not in phone_numbers:
+                    phone_numbers.append(pn)
+            for pp in _detect_payment_providers(cp.html_snippet):
+                if pp not in payment_providers:
+                    payment_providers.append(pp)
+            for ut in _detect_urgency_pressure(cp.html_snippet):
+                if ut not in urgency_tactics:
+                    urgency_tactics.append(ut)
+            for sp in _detect_social_proof_widgets(cp.html_snippet):
+                if sp not in social_proof:
+                    social_proof.append(sp)
+            # Accumulate price signals from product pages
+            if (cp.page_type or "") in ("product", "collection"):
+                page_prices = _price_anomaly_signals(cp.html_snippet)
+                if page_prices.get("found"):
+                    price_signals["extreme_discounts"] = (
+                        price_signals.get("extreme_discounts", 0)
+                        + page_prices.get("extreme_discounts", 0)
+                    )
+                    price_signals["price_count"] = (
+                        price_signals.get("price_count", 0)
+                        + page_prices.get("price_count", 0)
+                    )
+
+    # ── Build structured signals dict for AI ───────────────────
+    structured_signals: dict[str, Any] = {
+        "social_media": social_links,
+        "phone_numbers": phone_numbers[:5],
+        "payment_providers": payment_providers,
+        "meta_completeness": meta_info,
+        "copyright_year": copyright_year,
+        "urgency_tactics": urgency_tactics,
+        "social_proof_widgets": social_proof,
+        "outbound_links": outbound_links,
+        "has_cookie_consent": has_cookie_consent,
+        "price_signals": price_signals,
+        "robots_txt": robots_signals,
+        "ecommerce_signals": list(ecommerce_signals),
+        "detected_platform": detected_platform,
+    }
 
     # Build explainability items
     explainability: list[ExplainabilityItem] = []
@@ -1499,6 +1948,161 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             external_reviews_text = None
             warnings.append("External reviews: unavailable (blocked or network error)")
 
+    # ── NEW: Contact information richness ───────────────────────
+    try:
+        contact_details: list[str] = []
+        contact_verdict: Verdict = "unknown"
+        if phone_numbers:
+            contact_details.append(f"{len(phone_numbers)} phone number(s) found")
+        social_platforms = [p for p, links in social_links.items() if links]
+        if social_platforms:
+            contact_details.append(f"Social media: {', '.join(social_platforms)}")
+        if phone_numbers and len(social_platforms) >= 2:
+            contact_verdict = "good"
+        elif phone_numbers or social_platforms:
+            contact_verdict = "warn"
+        else:
+            contact_details.append("No phone numbers or social media links detected")
+            contact_verdict = "warn" if not is_well_known else "unknown"
+        if contact_details:
+            explainability.append(ExplainabilityItem(
+                key="contactInfo", label="Contact information",
+                verdict=contact_verdict, detail=" \u2022 ".join(contact_details),
+            ))
+    except Exception:
+        pass
+
+    # ── NEW: Payment security ────────────────────────────────
+    try:
+        known_secure = {"stripe", "paypal", "square", "apple_pay", "google_pay", "shopify_payments"}
+        if payment_providers:
+            secure_found = [p for p in payment_providers if p in known_secure]
+            if secure_found:
+                explainability.append(ExplainabilityItem(
+                    key="paymentSecurity", label="Payment processors",
+                    verdict="good",
+                    detail=f"Recognized processor(s): {', '.join(p.replace('_', ' ').title() for p in payment_providers)}",
+                ))
+            else:
+                explainability.append(ExplainabilityItem(
+                    key="paymentSecurity", label="Payment processors",
+                    verdict="warn",
+                    detail=f"Payment indicator(s): {', '.join(p.replace('_', ' ').title() for p in payment_providers)}",
+                ))
+        elif len(ecommerce_signals) >= 2:
+            explainability.append(ExplainabilityItem(
+                key="paymentSecurity", label="Payment processors",
+                verdict="warn",
+                detail="E-commerce site but no recognized payment processors detected.",
+            ))
+    except Exception:
+        pass
+
+    # ── NEW: Urgency / pressure tactics ───────────────────────
+    if urgency_tactics:
+        ut_count = len(urgency_tactics)
+        ut_verdict: Verdict = "bad" if ut_count >= 3 else "warn"
+        explainability.append(ExplainabilityItem(
+            key="urgencyTactics", label="Urgency/pressure tactics",
+            verdict=ut_verdict,
+            detail=f"Detected {ut_count} manipulation pattern(s): {', '.join(urgency_tactics[:5])}. Common on scam sites.",
+        ))
+
+    # ── NEW: Social proof widgets ────────────────────────────
+    try:
+        generic_badges = {"generic_trust_badge"}
+        real_widgets = [w for w in social_proof if w not in generic_badges]
+        fake_badges = [w for w in social_proof if w in generic_badges]
+        if real_widgets:
+            explainability.append(ExplainabilityItem(
+                key="socialProof", label="Third-party review widgets",
+                verdict="good",
+                detail=f"Embedded review widget(s): {', '.join(w.replace('_', ' ').title() for w in real_widgets)}",
+            ))
+        if fake_badges:
+            explainability.append(ExplainabilityItem(
+                key="genericBadges", label="Generic trust badges",
+                verdict="warn",
+                detail="Generic 'trust badges' or 'safe checkout' images found. Easily faked and common on scam sites.",
+            ))
+    except Exception:
+        pass
+
+    # ── NEW: Meta tag completeness ───────────────────────────
+    try:
+        if meta_info.get("score", 0) > 0:
+            meta_score_val = meta_info["score"]
+            meta_verdict: Verdict = "good" if meta_score_val >= 70 else ("warn" if meta_score_val >= 40 else "bad")
+            missing_str = ", ".join(meta_info.get("missing", [])[:4])
+            meta_detail = f"Meta tag completeness: {meta_info['present']}/{meta_info['total']}"
+            if missing_str and meta_score_val < 100:
+                meta_detail += f" (missing: {missing_str})"
+            explainability.append(ExplainabilityItem(
+                key="metaTags", label="Site metadata",
+                verdict=meta_verdict, detail=meta_detail,
+            ))
+    except Exception:
+        pass
+
+    # ── NEW: Copyright freshness ─────────────────────────────
+    try:
+        if copyright_year is not None:
+            current_year = datetime.now(timezone.utc).year
+            if copyright_year >= current_year - 1:
+                explainability.append(ExplainabilityItem(
+                    key="copyrightYear", label="Copyright year",
+                    verdict="good", detail=f"Copyright year ({copyright_year}) is current.",
+                ))
+            elif copyright_year >= current_year - 3:
+                explainability.append(ExplainabilityItem(
+                    key="copyrightYear", label="Copyright year",
+                    verdict="warn", detail=f"Copyright year ({copyright_year}) is slightly outdated.",
+                ))
+            else:
+                explainability.append(ExplainabilityItem(
+                    key="copyrightYear", label="Copyright year",
+                    verdict="warn",
+                    detail=f"Copyright year ({copyright_year}) is significantly outdated \u2014 may indicate abandoned or repurposed site.",
+                ))
+    except Exception:
+        pass
+
+    # ── NEW: Cookie / privacy compliance ──────────────────────
+    if has_cookie_consent:
+        explainability.append(ExplainabilityItem(
+            key="privacyCompliance", label="Privacy compliance",
+            verdict="good",
+            detail="Cookie consent / GDPR indicators found \u2014 suggests awareness of privacy regulations.",
+        ))
+
+    # ── NEW: Price anomaly signals ───────────────────────────
+    if price_signals.get("found") and price_signals.get("extreme_discounts", 0) >= 2:
+        explainability.append(ExplainabilityItem(
+            key="priceAnomaly", label="Pricing patterns",
+            verdict="bad",
+            detail="Multiple products show extreme discounts (80%+ off 'original' price). Common scam tactic.",
+        ))
+    elif price_signals.get("found") and price_signals.get("extreme_discounts", 0) >= 1:
+        explainability.append(ExplainabilityItem(
+            key="priceAnomaly", label="Pricing patterns",
+            verdict="warn",
+            detail="Some products show very steep discounts from 'compare at' prices.",
+        ))
+
+    # ── NEW: robots.txt signals ─────────────────────────────
+    if robots_signals.get("suspicious"):
+        explainability.append(ExplainabilityItem(
+            key="robotsTxt", label="robots.txt analysis",
+            verdict="warn",
+            detail="robots.txt blocks all crawlers with no sitemap \u2014 unusual for legitimate commercial sites.",
+        ))
+    elif robots_signals.get("exists") and robots_signals.get("has_sitemap_ref"):
+        explainability.append(ExplainabilityItem(
+            key="robotsTxt", label="robots.txt analysis",
+            verdict="good",
+            detail="Well-formed robots.txt with sitemap reference.",
+        ))
+
     # AI Judgment - PRIMARY scoring mechanism
     ai_judgment: AIJudgment | None = None
     crawled_pages_data = [p.model_dump() for p in (crawl_info.pages if crawl_info else [])]
@@ -1512,6 +2116,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         homepage_html=fetch.html_snippet,
         crawled_pages=crawled_pages_data,
         external_reviews=external_reviews_text,
+        structured_signals=structured_signals,
     )
 
     if ai_result:
@@ -1585,6 +2190,29 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             if issuer_verdict2 == "warn":
                 score -= 2
 
+        # NEW: Urgency / pressure tactic penalties
+        if urgency_tactics and len(urgency_tactics) >= 3:
+            score -= 8
+        elif urgency_tactics:
+            score -= 3
+
+        # NEW: Extreme pricing penalty
+        if price_signals.get("extreme_discounts", 0) >= 2:
+            score -= 6
+
+        # NEW: Contact info bonus
+        if phone_numbers and len(social_links) >= 2:
+            score += 3
+
+        # NEW: Recognized payment processor bonus
+        known_secure_pp = {"stripe", "paypal", "square", "apple_pay", "google_pay", "shopify_payments"}
+        if any(p in known_secure_pp for p in payment_providers):
+            score += 2
+
+        # NEW: Generic trust badge penalty (scam indicator)
+        if "generic_trust_badge" in social_proof and not any(w in social_proof for w in ("trustpilot", "bbb", "google_reviews")):
+            score -= 3
+
         final_score = _clamp_score(score)
     else:
         # Fallback heuristic
@@ -1638,4 +2266,5 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         analyzed_at=datetime.now(timezone.utc).isoformat(),
         timings_ms=timings,
         warnings=warnings,
+        signals=structured_signals,
     )

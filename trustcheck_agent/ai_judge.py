@@ -290,33 +290,29 @@ def _call_gemini(prompt: str, timeout: float = 30.0) -> dict[str, Any] | None:
 
 
 def fetch_external_reviews(hostname: str, timeout_ms: int = 5000) -> str:
-    """Fetch external review signals from sources that are reasonably bot-tolerant.
+    """Fetch external review signals from multiple sources.
 
-    Note: Sites like ScamAdviser frequently sit behind Cloudflare / human verification.
-    We intentionally do not scrape those pages because it produces unreliable results.
+    Tries Trustpilot, SiteJabber, and ScamAdviser (best-effort).
     """
     timeout = timeout_ms / 1000
     reviews_text = []
+    _ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 
     # Try Trustpilot
     try:
         with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             res = client.get(
                 f"https://www.trustpilot.com/review/{hostname}",
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html",
-                },
+                headers={"User-Agent": _ua, "Accept": "text/html"},
             )
             if res.status_code == 200:
                 html = res.text[:30000]
-                # Look for trust score
                 score_match = re.search(r'TrustScore\s*(\d+\.?\d*)', html, re.IGNORECASE)
                 reviews_match = re.search(r'(\d+(?:,\d+)*)\s*reviews?', html, re.IGNORECASE)
                 rating_match = re.search(r'"ratingValue"\s*:\s*"?(\d+\.?\d*)"?', html)
 
                 if score_match or reviews_match or rating_match:
-                    tp_info = f"Trustpilot: "
+                    tp_info = "Trustpilot: "
                     if rating_match:
                         tp_info += f"Rating {rating_match.group(1)}/5, "
                     if score_match:
@@ -329,13 +325,146 @@ def fetch_external_reviews(hostname: str, timeout_ms: int = 5000) -> str:
             elif res.status_code == 404:
                 reviews_text.append("Trustpilot: Not listed (no reviews)")
     except Exception:
-        reviews_text.append("Trustpilot: Unavailable (blocked or network error)")
+        reviews_text.append("Trustpilot: Unavailable")
+
+    # Try SiteJabber
+    try:
+        with httpx.Client(timeout=min(timeout, 4), follow_redirects=True) as client:
+            res = client.get(
+                f"https://www.sitejabber.com/reviews/{hostname}",
+                headers={"User-Agent": _ua, "Accept": "text/html"},
+            )
+            if res.status_code == 200:
+                html = res.text[:20000]
+                rating_match = re.search(r'"ratingValue"\s*:\s*"?(\d+\.?\d*)"?', html)
+                reviews_match = re.search(r'(\d+)\s*reviews?', html, re.IGNORECASE)
+                if rating_match:
+                    sj = f"SiteJabber: Rating {rating_match.group(1)}/5"
+                    if reviews_match:
+                        sj += f", {reviews_match.group(1)} reviews"
+                    reviews_text.append(sj)
+                else:
+                    reviews_text.append("SiteJabber: Listed but no clear rating")
+            elif res.status_code == 404:
+                reviews_text.append("SiteJabber: Not listed")
+    except Exception:
+        pass  # SiteJabber is a bonus source, don't report failures
+
+    # Try ScamAdviser (often blocked, but worth a shot)
+    try:
+        with httpx.Client(timeout=min(timeout, 4), follow_redirects=True) as client:
+            res = client.get(
+                f"https://www.scamadviser.com/check-website/{hostname}",
+                headers={"User-Agent": _ua, "Accept": "text/html"},
+            )
+            if res.status_code == 200:
+                html = res.text[:20000]
+                trust_match = re.search(r'(?:trust(?:score|rating)|overall\s+score)["\s:]+?(\d+)', html, re.IGNORECASE)
+                if trust_match:
+                    reviews_text.append(f"ScamAdviser: Trust score {trust_match.group(1)}/100")
+    except Exception:
+        pass  # ScamAdviser often blocks automated access
 
     return (
         "\n".join(reviews_text)
         if reviews_text
         else "External reviews unavailable (many sources block automated checks)"
     )
+
+
+def _format_structured_signals(signals: dict[str, Any] | None) -> str:
+    """Format structured signals into human-readable text for the AI prompt."""
+    if not signals:
+        return ""
+    lines: list[str] = []
+
+    # Contact information
+    phones = signals.get("phone_numbers", [])
+    social = signals.get("social_media", {})
+    lines.append("## Contact & Social Media")
+    lines.append(f"  Phone numbers found: {len(phones)} {'(' + ', '.join(phones[:3]) + ')' if phones else '(none)'}")
+    if social:
+        for platform, urls in social.items():
+            lines.append(f"  {platform.title()}: {urls[0] if urls else 'N/A'}")
+    else:
+        lines.append("  Social media links: None found")
+
+    # Payment
+    payments = signals.get("payment_providers", [])
+    lines.append("## Payment Processors")
+    if payments:
+        lines.append(f"  Detected: {', '.join(p.replace('_', ' ').title() for p in payments)}")
+    else:
+        lines.append("  No recognized payment processors detected")
+
+    # E-commerce signals
+    ecom = signals.get("ecommerce_signals", [])
+    if ecom:
+        lines.append(f"  E-commerce signals: {', '.join(ecom)}")
+
+    # Urgency / pressure
+    urgency = signals.get("urgency_tactics", [])
+    lines.append("## Urgency/Pressure Tactics")
+    if urgency:
+        lines.append(f"  DETECTED ({len(urgency)}): {', '.join(urgency)}")
+    else:
+        lines.append("  None detected")
+
+    # Price signals
+    prices = signals.get("price_signals", {})
+    if prices.get("found"):
+        lines.append("## Pricing Analysis")
+        lines.append(f"  Products priced: {prices.get('price_count', 0)} items")
+        lines.append(f"  Average: ${prices.get('avg_price', 'N/A')}, Min: ${prices.get('min_price', 'N/A')}, Max: ${prices.get('max_price', 'N/A')}")
+        extreme = prices.get("extreme_discounts", 0)
+        if extreme:
+            lines.append(f"  \u26a0\ufe0f EXTREME DISCOUNTS: {extreme} product(s) show 80%+ off 'original' price")
+        if prices.get("has_compare_pricing"):
+            lines.append("  Uses 'compare at' / strikethrough pricing")
+
+    # Social proof widgets
+    widgets = signals.get("social_proof_widgets", [])
+    lines.append("## Trust Widgets & Badges")
+    if widgets:
+        lines.append(f"  Found: {', '.join(w.replace('_', ' ').title() for w in widgets)}")
+        if "generic_trust_badge" in widgets:
+            lines.append("  \u26a0\ufe0f Generic 'trust badge' images detected (easily faked)")
+    else:
+        lines.append("  No third-party review/trust widgets found")
+
+    # Meta / site quality
+    meta = signals.get("meta_completeness", {})
+    lines.append("## Site Quality Indicators")
+    if meta.get("score") is not None:
+        lines.append(f"  Meta tag completeness: {meta.get('present', 0)}/{meta.get('total', 9)} ({meta.get('score', 0)}%)")
+        missing = meta.get("missing", [])
+        if missing:
+            lines.append(f"  Missing: {', '.join(missing[:5])}")
+    cy = signals.get("copyright_year")
+    if cy:
+        lines.append(f"  Copyright year: {cy}")
+    if signals.get("has_cookie_consent"):
+        lines.append("  Cookie consent / GDPR indicators: Yes")
+    else:
+        lines.append("  Cookie consent / GDPR indicators: No")
+
+    # robots.txt
+    robots = signals.get("robots_txt", {})
+    if robots.get("exists"):
+        lines.append(f"  robots.txt: exists (disallow_all={robots.get('disallow_all', False)}, has_sitemap={robots.get('has_sitemap_ref', False)})")
+
+    # Outbound links
+    outbound = signals.get("outbound_links", {})
+    if outbound.get("count", 0) > 0:
+        lines.append("## Outbound Links")
+        lines.append(f"  {outbound['count']} external links to {outbound.get('unique_domains', 0)} domains")
+        top = outbound.get("top_domains", [])[:5]
+        if top:
+            lines.append(f"  Top: {', '.join(d['domain'] for d in top)}")
+
+    lines.append(f"  Platform: {signals.get('detected_platform', 'unknown')}")
+
+    return "\n".join(lines)
 
 
 def judge_website(
@@ -347,6 +476,7 @@ def judge_website(
     homepage_html: str | None,
     crawled_pages: list[dict[str, Any]] | None,
     external_reviews: str | None = None,
+    structured_signals: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """
     Use Gemini to judge the website's legitimacy.
@@ -391,6 +521,7 @@ def judge_website(
         "external_reviews": external_reviews or "Not checked",
         "homepage_html": homepage_html or "Not available",
         "crawled_pages_text": crawled_text or "No additional pages crawled",
+        "structured_signals_text": _format_structured_signals(structured_signals),
     }
 
     prompt = _build_prompt(site_data)

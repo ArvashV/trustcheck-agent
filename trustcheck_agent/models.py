@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -100,6 +100,7 @@ class AnalyzeResponse(BaseModel):
     analyzed_at: str
     timings_ms: dict[str, int]
     warnings: list[str] = []
+    signals: dict[str, Any] = {}
 
 
 class ScreenshotRequest(BaseModel):
