@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-Verdict = Literal["good", "warn", "bad", "unknown"]
+Verdict = Literal["good", "warn", "bad", "unknown", "info"]
 
 
 class AnalyzeRequest(BaseModel):
@@ -76,6 +76,9 @@ class AIJudgment(BaseModel):
     business_identity: str
     summary: str
     recommendation: str
+    investigation_log: list[str] = []
+    contradictions_found: list[str] = []
+    identity_verdict: str = "unverifiable"
 
 
 class AnalyzeResponse(BaseModel):

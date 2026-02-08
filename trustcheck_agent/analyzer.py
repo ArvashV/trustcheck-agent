@@ -1766,6 +1766,11 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         )
 
     # Ownership identity extraction (best-effort)
+    # These are hoisted so they remain accessible after the try-block for
+    # structured_signals enrichment (identity investigation by AI).
+    _identity_emails: list[str] = []
+    _identity_company: str | None = None
+    _identity_address: str | None = None
     try:
         pages_for_identity: list[str] = [fetch.html_snippet or ""]
         if crawl_info and crawl_info.pages:
@@ -1848,8 +1853,20 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                     detail=" • ".join(details),
                 )
             )
+        # Hoist identity data for AI investigation
+        _identity_emails = sorted(emails)[:5]
+        _identity_company = top_name
+        _identity_address = top_addr
     except Exception:
         pass
+
+    # Enrich structured_signals with extracted identity data so the AI judge
+    # can actively investigate these identifiers via Google Search.
+    structured_signals["email_addresses"] = _identity_emails
+    if _identity_company:
+        structured_signals["company_name"] = _identity_company
+    if _identity_address:
+        structured_signals["physical_address"] = _identity_address
 
     # Language consistency (homepage vs policy pages)
     try:
@@ -2287,6 +2304,42 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                     verdict="bad" if ai_judgment.verdict in ("suspicious", "likely_deceptive") else "warn",
                     detail=issue,
                 ))
+
+            # ── INVESTIGATION RESULTS explainability ─────────────
+            if ai_judgment.investigation_log:
+                for j, step in enumerate(ai_judgment.investigation_log[:5]):
+                    explainability.append(ExplainabilityItem(
+                        key=f"investigationStep{j}",
+                        label="Investigation step",
+                        verdict="info",
+                        detail=step,
+                    ))
+
+            if ai_judgment.contradictions_found:
+                for k, contra in enumerate(ai_judgment.contradictions_found[:4]):
+                    explainability.append(ExplainabilityItem(
+                        key=f"contradiction{k}",
+                        label="Contradiction found",
+                        verdict="bad",
+                        detail=contra,
+                    ))
+
+            id_verdict = ai_judgment.identity_verdict
+            if id_verdict and id_verdict != "unverifiable":
+                id_v: Verdict = "unknown"
+                id_label = id_verdict.replace("_", " ").title()
+                if id_verdict == "verified_real_business":
+                    id_v = "good"
+                elif id_verdict == "suspicious_identity":
+                    id_v = "warn"
+                elif id_verdict == "confirmed_fraud_links":
+                    id_v = "bad"
+                explainability.append(ExplainabilityItem(
+                    key="identityVerdict",
+                    label="Identity verification",
+                    verdict=id_v,
+                    detail=f"Identity cross-reference result: {id_label}",
+                ))
         except Exception as e:
             warnings.append(f"AI judgment parse error: {e}")
 
@@ -2359,6 +2412,19 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
                 score -= 4
             elif visual_result.get("layout_quality") == "professional":
                 score += 3
+
+        # ── INVESTIGATION score adjustments ───────────────────────
+        if ai_judgment.identity_verdict == "confirmed_fraud_links":
+            score -= 15
+        elif ai_judgment.identity_verdict == "suspicious_identity":
+            score -= 6
+        elif ai_judgment.identity_verdict == "verified_real_business":
+            score += 5
+
+        if len(ai_judgment.contradictions_found) >= 3:
+            score -= 8
+        elif ai_judgment.contradictions_found:
+            score -= 3
 
         final_score = _clamp_score(score)
     else:

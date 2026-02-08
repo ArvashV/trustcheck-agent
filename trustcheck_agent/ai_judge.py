@@ -124,6 +124,18 @@ def _normalize_ai_output(raw: Any) -> dict[str, Any] | None:
     if not recommendation:
         recommendation = "Exercise caution"
 
+    # investigation_log — step-by-step detective notes
+    investigation_log = _as_str_list(raw.get("investigation_log"))
+
+    # contradictions_found — cross-page inconsistencies
+    contradictions_found = _as_str_list(raw.get("contradictions_found"))
+
+    # identity_verdict — result of active identity investigation
+    _ALLOWED_ID_VERDICTS = {"verified_real_business", "unverifiable", "suspicious_identity", "confirmed_fraud_links"}
+    identity_verdict = str(raw.get("identity_verdict") or "unverifiable").strip().lower()
+    if identity_verdict not in _ALLOWED_ID_VERDICTS:
+        identity_verdict = "unverifiable"
+
     return {
         "legitimacy_score": score,
         "confidence": confidence,
@@ -136,6 +148,9 @@ def _normalize_ai_output(raw: Any) -> dict[str, Any] | None:
         "business_identity": business_identity,
         "summary": summary,
         "recommendation": recommendation,
+        "investigation_log": investigation_log,
+        "contradictions_found": contradictions_found,
+        "identity_verdict": identity_verdict,
     }
 
 
@@ -190,6 +205,31 @@ Major established brands (Amazon, Walmart, Apple, etc.) should score high even i
    - Copied branding elements
    - Different company behind it
 
+## INVESTIGATION PROTOCOL (CRITICAL — this is what makes you a detective, not just a scanner)
+
+You have Google Search. USE IT ACTIVELY to investigate the identifiers below.
+For each identifier, search the web and record what you find in "investigation_log".
+
+### Step 1: Cross-Reference Identifiers
+For EACH email, phone, company name, and address provided below:
+- Search: "<email address>" scam OR fraud OR complaint
+- Search: "<phone number>" reviews OR scam
+- Search: "<company name>" legitimate OR complaints OR BBB
+- Search: "<physical address>" (check if it's a real business location or a residential/empty lot)
+If ANY identifier appears linked to OTHER scam domains or fraud reports, this is a CONFIRMED scam — score must be under 20.
+
+### Step 2: Contradiction Hunting
+Look for contradictions ACROSS pages:
+- Footer says "Est. 2020" but domain is 3 weeks old?
+- Address is in "New York" but policies reference "UK Consumer Rights Act"?
+- Copyright says one company name, About page says another?
+- Refund policy says "30 days" on one page, "14 days" on another?
+- Claims "thousands of happy customers" but Trustpilot shows 0 reviews?
+Each contradiction is a red flag. 3+ contradictions = likely_deceptive.
+
+### Step 3: Product Verification
+For e-commerce sites, search for 1-2 product names + "review" to see if they exist elsewhere at very different prices (dropshipping signal).
+
 ## WEBSITE DATA TO ANALYZE
 
 URL: {site_data.get('url', 'Unknown')}
@@ -199,6 +239,9 @@ Is Well-Known Brand: {site_data.get('is_well_known', False)}
 HTTP Status: {site_data.get('http_status', 'Unknown')}
 Platform Detected: {site_data.get('platform', 'Unknown')}
 Pages Crawled: {site_data.get('pages_crawled', 0)}
+
+### Structured Signals (extracted automatically):
+{site_data.get('structured_signals_text', 'None available')}
 
 ### External Reviews Found:
 {site_data.get('external_reviews', 'No external reviews found')}
@@ -224,44 +267,44 @@ Respond with ONLY valid JSON (no markdown, no code blocks):
   "product_legitimacy": "<real_products|questionable_products|fake_impossible_products|not_applicable>",
   "business_identity": "<verified|partial|missing|fake>",
   "summary": "<One clear sentence about the site's trustworthiness>",
-  "recommendation": "<What users should do>"
+  "recommendation": "<What users should do>",
+  "investigation_log": ["<Step-by-step log of what you investigated and found. e.g. 'Searched for support@shop.com — found linked to 2 fraud reports on ScamPulse', 'Address 123 Main St — Google Maps shows vacant lot', 'Product X found on AliExpress for $3 vs $49 here'>"],
+  "contradictions_found": ["<List of specific contradictions found across pages, e.g. 'Footer says Est. 2019 but domain registered 2024-12-01'>"],
+  "identity_verdict": "<verified_real_business|unverifiable|suspicious_identity|confirmed_fraud_links>"
 }}
 
-Be thorough. If you see impossible product claims (like non-invasive glucose meters for consumers), that's a MAJOR red flag - score should be under 30."""
+Be thorough. If you see impossible product claims (like non-invasive glucose meters for consumers), that's a MAJOR red flag - score should be under 30.
+If you find the contact info linked to other scams via Google Search, score MUST be under 20.
+If you find 3+ contradictions across pages, score should be under 35."""
 
 
 # ---------------------------------------------------------------------------
 # Visual (multimodal) screenshot analysis via Gemini 3 code execution
 # ---------------------------------------------------------------------------
 
-_VISUAL_ANALYSIS_PROMPT = """You are a visual scam/trust analyst. You're given a screenshot of a website.
-Use your code execution capability to analyze the image programmatically:
-1. Examine the overall layout — does it look like a cheap template or professional design?
-2. Look for trust badges — are they generic/fake images or real verified widgets (Trustpilot, BBB, Norton)?
-3. Check for urgency elements — countdown timers, "only X left", flashing sale banners.
-4. Look for stock photo watermarks or suspiciously perfect product imagery.
-5. Check the header/footer — does it have complete navigation, contact info, proper branding?
-6. Examine text quality — blurry text, inconsistent fonts, overlapping elements.
-7. Look for popup/overlay patterns — aggressive email captures, fake "someone just bought" notifications.
-8. Check the color scheme and visual consistency.
+_VISUAL_ANALYSIS_PROMPT = """You are a visual scam/trust analyst. Examine this website screenshot carefully using your vision capabilities:
 
-Write Python code to analyze the image structure, colors, text regions, and suspicious patterns.
-Then provide your analysis.
+1. Overall layout — cheap template / clone, or professional custom design?
+2. Trust badges — generic fake images, or real verified widgets (Trustpilot, BBB, Norton)?
+3. Urgency elements — countdown timers, "only X left", flashing sale banners?
+4. Product imagery — stock photos with watermarks, suspiciously uniform/perfect images?
+5. Header/footer — complete navigation, contact info, proper branding present?
+6. Text quality — blurry text, inconsistent fonts, overlapping or misaligned elements?
+7. Popups/overlays — aggressive email captures, fake "someone just bought" notifications?
+8. Color scheme and visual consistency — does it look cohesive or thrown together?
+9. Logo quality — pixelated, stretched, or missing?
+10. Mobile-responsiveness clues — does the layout appear properly sized?
 
-You MUST return your final analysis in this exact JSON format (as plain text at the end):
-```json
-{
-  "visual_trust_score": <0-100>,
-  "layout_quality": "<professional|acceptable|poor|template_clone>",
-  "suspicious_elements": ["<list of visually suspicious things>"],
-  "trust_indicators": ["<list of positive visual signals>"],
-  "fake_badge_detected": <true|false>,
-  "urgency_visuals": <true|false>,
-  "stock_photo_suspected": <true|false>,
-  "popup_overlay_detected": <true|false>,
-  "visual_summary": "<One clear sentence about the site's visual trustworthiness>"
-}
-```"""
+Return your analysis as JSON with these exact fields:
+- visual_trust_score: integer 0-100
+- layout_quality: one of "professional", "acceptable", "poor", "template_clone"
+- suspicious_elements: array of strings describing suspicious visual elements
+- trust_indicators: array of strings describing positive visual signals
+- fake_badge_detected: boolean
+- urgency_visuals: boolean
+- stock_photo_suspected: boolean
+- popup_overlay_detected: boolean
+- visual_summary: one clear sentence about the site's visual trustworthiness"""
 
 
 def _normalize_visual_output(raw_text: str) -> dict[str, Any] | None:
@@ -357,10 +400,13 @@ def visual_analyze_screenshot(
             + _VISUAL_ANALYSIS_PROMPT
         )
 
+        # Use direct multimodal vision (no code_execution) with structured
+        # JSON output for reliability.  code_execution was failing because
+        # the sandbox lacks image-processing libraries.
         config = types.GenerateContentConfig(
-            tools=[types.Tool(code_execution=types.ToolCodeExecution())],
+            response_mime_type="application/json",
             temperature=0.2,
-            max_output_tokens=8192,
+            max_output_tokens=4096,
         )
 
         resp = client.models.generate_content(
@@ -369,17 +415,22 @@ def visual_analyze_screenshot(
             config=config,
         )
 
-        # Extract text from all parts (code execution returns multiple parts)
-        full_text = ""
-        if resp.candidates:
-            for part in (resp.candidates[0].content.parts or []):
-                if hasattr(part, "text") and part.text:
-                    full_text += part.text + "\n"
+        raw_text = (getattr(resp, "text", None) or "").strip()
+        if not raw_text:
+            # Fallback: try extracting from candidate parts
+            if resp.candidates:
+                for part in (resp.candidates[0].content.parts or []):
+                    if hasattr(part, "text") and part.text:
+                        raw_text += part.text + "\n"
+            raw_text = raw_text.strip()
 
-        if not full_text.strip():
+        if not raw_text:
+            print("Visual analysis: Gemini returned empty response")
             return None
 
-        return _normalize_visual_output(full_text)
+        # With response_mime_type="application/json" Gemini usually returns
+        # clean JSON, but _normalize_visual_output handles edge cases too.
+        return _normalize_visual_output(raw_text)
 
     except Exception as exc:
         print(f"Visual screenshot analysis failed: {exc}")
@@ -545,11 +596,25 @@ def _format_structured_signals(signals: dict[str, Any] | None) -> str:
         return ""
     lines: list[str] = []
 
+    # Identifiers for investigation
+    emails = signals.get("email_addresses", [])
+    company = signals.get("company_name")
+    address = signals.get("physical_address")
+    lines.append("## IDENTIFIERS TO INVESTIGATE (use Google Search on these!)")
+    if emails:
+        lines.append(f"  Email addresses: {', '.join(emails[:4])}")
+    if company:
+        lines.append(f"  Company name: {company}")
+    if address:
+        lines.append(f"  Physical address: {address}")
+
     # Contact information
     phones = signals.get("phone_numbers", [])
     social = signals.get("social_media", {})
     lines.append("## Contact & Social Media")
     lines.append(f"  Phone numbers found: {len(phones)} {'(' + ', '.join(phones[:3]) + ')' if phones else '(none)'}")
+    if phones:
+        lines.append(f"  Phone numbers: {', '.join(phones[:3])}")
     if social:
         for platform, urls in social.items():
             lines.append(f"  {platform.title()}: {urls[0] if urls else 'N/A'}")
