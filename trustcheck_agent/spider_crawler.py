@@ -138,9 +138,6 @@ def _python_spider_crawl(
     redirect_hostname: str | None = None,
 ) -> SpiderCrawlInfo:
     timeout = timeout_ms / 1000
-    # Overall wall-clock deadline so the crawl cannot hang indefinitely.
-    wall_deadline = time.monotonic() + min(timeout_ms / 1000 * 2, 180)
-
     pages: list[CrawlPage] = []
     link_graph: list[SpiderLink] = []
     seen_lock = threading.Lock()
