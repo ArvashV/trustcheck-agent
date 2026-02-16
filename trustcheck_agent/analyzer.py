@@ -1468,13 +1468,16 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
             timings[name] = int((time.perf_counter() - start) * 1000)
 
     # Parallel fetch: RDAP, HTTP signals, TLS, robots.txt, screenshot
+    # Cap individual task timeouts at 8 s so the parallel phase finishes
+    # quickly and leaves headroom for the crawler + AI within Heroku's 30 s.
+    io_timeout = min(req.timeout_ms, 8000)
     with ThreadPoolExecutor(max_workers=7) as pool:
         futures = {
-            pool.submit(timed, "rdap", lambda: _fetch_rdap_domain_age_days(hostname, req.timeout_ms)): "rdap",
-            pool.submit(timed, "fetch", lambda: _fetch_http_signals(normalized_url, req.timeout_ms, req.max_html_kb, req.user_agent)): "fetch",
-            pool.submit(timed, "tls", lambda: _tls_info(hostname, req.timeout_ms)): "tls",
-            pool.submit(timed, "robots", lambda: _fetch_robots_txt_signals(hostname, req.timeout_ms, req.user_agent)): "robots",
-            pool.submit(timed, "screenshot", lambda: _capture_screenshot_sync(normalized_url, req.timeout_ms)): "screenshot",
+            pool.submit(timed, "rdap", lambda: _fetch_rdap_domain_age_days(hostname, io_timeout)): "rdap",
+            pool.submit(timed, "fetch", lambda: _fetch_http_signals(normalized_url, io_timeout, req.max_html_kb, req.user_agent)): "fetch",
+            pool.submit(timed, "tls", lambda: _tls_info(hostname, io_timeout)): "tls",
+            pool.submit(timed, "robots", lambda: _fetch_robots_txt_signals(hostname, io_timeout, req.user_agent)): "robots",
+            pool.submit(timed, "screenshot", lambda: _capture_screenshot_sync(normalized_url, io_timeout)): "screenshot",
         }
 
         domain_age_days: int | None = None

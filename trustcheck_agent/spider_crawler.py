@@ -139,7 +139,12 @@ def _python_spider_crawl(
 ) -> SpiderCrawlInfo:
     timeout = timeout_ms / 1000
     # Overall wall-clock deadline so the crawl cannot hang indefinitely.
-    wall_deadline = time.monotonic() + min(timeout_ms / 1000 * 2, 180)
+    # NOTE: the old formula (timeout_ms * 2, cap 180) caused the crawl alone
+    # to exceed Heroku's 30 s router timeout.  We now use the raw timeout
+    # value with a 20 s cap — enough to sample 10-15 pages while leaving
+    # headroom for the parallel-fetch phase and AI analysis that surround
+    # the crawl in analyzer.py.
+    wall_deadline = time.monotonic() + min(timeout_ms / 1000, 20)
     pages: list[CrawlPage] = []
     link_graph: list[SpiderLink] = []
     seen_lock = threading.Lock()
