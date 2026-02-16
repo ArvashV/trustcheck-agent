@@ -83,7 +83,7 @@ class SpiderCrawlInfo:
 def spider_crawl(
     start_url: str,
     hostname: str,
-    timeout_ms: int = 45000,
+    timeout_ms: int = 180000,
     user_agent: str = "Mozilla/5.0 TrustCheckSpider/1.0",
     max_pages: int = 30,
     max_depth: int = 3,
@@ -138,6 +138,8 @@ def _python_spider_crawl(
     redirect_hostname: str | None = None,
 ) -> SpiderCrawlInfo:
     timeout = timeout_ms / 1000
+    # Overall wall-clock deadline so the crawl cannot hang indefinitely.
+    wall_deadline = time.monotonic() + min(timeout_ms / 1000 * 2, 180)
     pages: list[CrawlPage] = []
     link_graph: list[SpiderLink] = []
     seen_lock = threading.Lock()
