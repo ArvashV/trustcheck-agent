@@ -83,11 +83,12 @@ class SpiderCrawlInfo:
 def spider_crawl(
     start_url: str,
     hostname: str,
-    timeout_ms: int = 20000,
+    timeout_ms: int = 45000,
     user_agent: str = "Mozilla/5.0 TrustCheckSpider/1.0",
     max_pages: int = 30,
     max_depth: int = 3,
     max_concurrent: int = 8,
+    redirect_hostname: str | None = None,
 ) -> SpiderCrawlInfo:
     """Crawl a website starting from *start_url*, respecting depth/page limits.
 
@@ -96,11 +97,21 @@ def spider_crawl(
     CDN/WAF rate-limiters on legitimate sites — aggressive concurrency was
     causing more pages to be fetched from unprotected scam sites than from
     well-secured legitimate ones, skewing trust scores.
+
+    *redirect_hostname* — if the caller already knows the site redirected to a
+    different host (e.g. ``mystore.myshopify.com``), pass it here so both the
+    original and redirect domains are treated as valid crawl targets from the
+    start.  Without this, cross-platform redirects (Shopify, BigCartel,
+    Squarespace, etc.) cause every extracted link to be rejected by the domain
+    filter, leaving the crawl stuck at 1 page.
     """
     if RUST_AVAILABLE:
         try:
+            # Rust crawler currently takes a single hostname — pass the redirect
+            # hostname (the one with actual content) when available.
+            effective_hostname = redirect_hostname or hostname
             result = rust_spider_crawl(
-                start_url, hostname, timeout_ms, user_agent, max_pages, max_depth, max_concurrent
+                start_url, effective_hostname, timeout_ms, user_agent, max_pages, max_depth, max_concurrent
             )
             pages = [CrawlPage(
                 url=p.url, final_url=p.final_url, http_status=p.http_status,
@@ -114,7 +125,7 @@ def spider_crawl(
             )
         except Exception as exc:
             logger.warning("Rust spider_crawl failed, falling back to Python: %s", exc)
-    return _python_spider_crawl(start_url, hostname, timeout_ms, user_agent, max_pages, max_depth, max_concurrent)
+    return _python_spider_crawl(start_url, hostname, timeout_ms, user_agent, max_pages, max_depth, max_concurrent, redirect_hostname)
 
 def _python_spider_crawl(
     start_url: str,
@@ -124,10 +135,11 @@ def _python_spider_crawl(
     max_pages: int,
     max_depth: int,
     max_concurrent: int,
+    redirect_hostname: str | None = None,
 ) -> SpiderCrawlInfo:
     timeout = timeout_ms / 1000
     # Overall wall-clock deadline so the crawl cannot hang indefinitely.
-    wall_deadline = time.monotonic() + min(timeout_ms / 1000 * 2, 120)
+    wall_deadline = time.monotonic() + min(timeout_ms / 1000 * 2, 180)
 
     pages: list[CrawlPage] = []
     link_graph: list[SpiderLink] = []
@@ -137,6 +149,38 @@ def _python_spider_crawl(
     queue: deque[tuple[str, str | None, int]] = deque()
     max_depth_reached = 0
     rate_limited = False  # track if the target is rate-limiting us
+
+    # ------------------------------------------------------------------
+    # ALLOWED DOMAINS — the set of registrable domains we'll follow links
+    # into.  This is the FIX for the "1 page crawled" bug: previously we
+    # only allowed `_get_domain(hostname)`, but when a site redirects to a
+    # different platform domain (e.g. shop.com → shop.myshopify.com) ALL
+    # links on the redirected page were rejected because myshopify.com !=
+    # shop.com.  Now we track every domain the site legitimately lives on.
+    # ------------------------------------------------------------------
+    allowed_domains: set[str] = set()
+    allowed_domains.add(_get_domain(hostname))
+    # Also allow the domain implied by the start_url itself (it may differ
+    # from `hostname` when the analyzer already followed a redirect).
+    try:
+        start_host = urlparse(start_url).hostname
+        if start_host:
+            allowed_domains.add(_get_domain(start_host))
+    except Exception:
+        pass
+    if redirect_hostname:
+        allowed_domains.add(_get_domain(redirect_hostname))
+
+    # All hostnames we know about — used for seeding common paths.
+    known_hosts: list[str] = [hostname]
+    if redirect_hostname and redirect_hostname != hostname:
+        known_hosts.append(redirect_hostname)
+    try:
+        sh = urlparse(start_url).hostname
+        if sh and sh not in known_hosts:
+            known_hosts.append(sh)
+    except Exception:
+        pass
 
     norm_start = _normalize_crawl_url(start_url)
     queue.append((norm_start, None, 0))
@@ -185,8 +229,8 @@ def _python_spider_crawl(
             return CrawlPage(url=url, fetch_note=str(e))
 
     def extract_links(html: str, base_url: str) -> list[tuple[str, str]]:
+        """Extract internal links, checking against ALL allowed domains."""
         links = []
-        base_domain = _get_domain(hostname)
 
         hrefs: set[str] = set()
         for m in _HREF_RE.finditer(html):
@@ -205,7 +249,8 @@ def _python_spider_crawl(
                 p = urlparse(abs_url)
                 if p.scheme not in ("http", "https") or not p.hostname:
                     continue
-                if _get_domain(p.hostname) != base_domain:
+                link_domain = _get_domain(p.hostname)
+                if link_domain not in allowed_domains:
                     continue
                 if _is_asset(p.path) or _is_low_value(p.path):
                     continue
@@ -217,6 +262,47 @@ def _python_spider_crawl(
             except Exception:
                 continue
         return links
+
+    def _seed_common_paths():
+        """Inject well-known trust-relevant paths on all known hosts.
+
+        This is a critical fallback for:
+        - JavaScript-heavy SPAs where no hrefs exist in raw HTML
+        - Pages where all links point to external CDNs
+        - Cross-domain redirects where initial link extraction found nothing
+
+        These paths are probed in parallel alongside the BFS crawl, so they
+        don't slow anything down — they just ensure we always attempt the
+        pages that matter most for trust analysis.
+        """
+        common_paths = [
+            "/contact", "/about", "/about-us", "/pages/about-us", "/pages/contact",
+            "/privacy-policy", "/policies/privacy-policy", "/privacy",
+            "/terms-of-service", "/policies/terms-of-service", "/terms",
+            "/refund-policy", "/policies/refund-policy",
+            "/shipping-policy", "/policies/shipping-policy",
+            "/return-policy", "/policies/return-policy",
+            "/collections/all", "/products", "/shop",
+            "/faq", "/pages/faq",
+        ]
+        seeded = 0
+        for host in known_hosts:
+            scheme = "https"
+            origin = f"{scheme}://{host}"
+            for path in common_paths:
+                if len(seen) >= max_pages * 3:
+                    return seeded
+                candidate = _normalize_crawl_url(urljoin(origin, path))
+                with seen_lock:
+                    if candidate not in seen:
+                        seen.add(candidate)
+                        link_graph.append(SpiderLink(candidate, norm_start, 1, "pattern_seed"))
+                        queue.append((candidate, norm_start, 1))
+                        seeded += 1
+        return seeded
+
+    pages_before_seed = 0
+    seed_injected = False
 
     try:
         while queue and len(pages) < max_pages:
@@ -248,10 +334,33 @@ def _python_spider_crawl(
 
                         # Deduplicate on final URL after redirects.
                         final = page.final_url or url
+                        final_norm = _normalize_crawl_url(final)
                         with seen_lock:
-                            if final in seen_final:
+                            if final_norm in seen_final:
                                 continue
-                            seen_final.add(final)
+                            seen_final.add(final_norm)
+
+                        # --------------------------------------------------
+                        # DYNAMIC DOMAIN DISCOVERY: if the page redirected to
+                        # a new domain we haven't seen yet, add it to the
+                        # allowed set so subsequent links on that domain are
+                        # followed.  This handles chains like:
+                        #   shop.com → www.shop.com → shop.myshopify.com
+                        # --------------------------------------------------
+                        try:
+                            final_host = urlparse(final).hostname
+                            if final_host:
+                                new_domain = _get_domain(final_host)
+                                if new_domain not in allowed_domains:
+                                    allowed_domains.add(new_domain)
+                                    if final_host not in known_hosts:
+                                        known_hosts.append(final_host)
+                                    logger.info(
+                                        "Spider discovered new domain via redirect: %s (from %s)",
+                                        new_domain, url,
+                                    )
+                        except Exception:
+                            pass
 
                         pages.append(page)
                         max_depth_reached = max(max_depth_reached, depth)
@@ -270,6 +379,21 @@ def _python_spider_crawl(
                                             queue.append((link_url, url, new_depth))
                     except Exception:
                         continue
+
+            # ------------------------------------------------------------------
+            # PATTERN SEED: after the first batch completes, if the queue is
+            # empty or nearly empty (link extraction found very little), inject
+            # well-known paths.  This runs only once and guarantees we always
+            # probe about/contact/privacy/terms etc. in parallel.
+            # ------------------------------------------------------------------
+            if not seed_injected and len(pages) > 0 and len(queue) < 3:
+                seeded = _seed_common_paths()
+                seed_injected = True
+                if seeded > 0:
+                    logger.info(
+                        "Seeded %d common trust-relevant paths (queue was nearly empty after %d pages)",
+                        seeded, len(pages),
+                    )
     finally:
         client.close()
 

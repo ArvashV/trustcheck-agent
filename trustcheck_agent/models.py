@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-Verdict = Literal["good", "warn", "bad", "unknown"]
+Verdict = Literal["good", "warn", "bad", "unknown", "info"]
 
 
 class AnalyzeRequest(BaseModel):
     url: str = Field(..., min_length=1)
-    # A slightly higher default helps multi-page crawling; callers can raise up to 60s.
-    timeout_ms: int = Field(20000, ge=1000, le=60000)
+    # Generous default — real-world sites often need 60-90s for full crawl + AI.
+    timeout_ms: int = Field(90000, ge=1000, le=180000)
     max_html_kb: int = Field(512, ge=0, le=4096)
     user_agent: str = Field(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -76,6 +76,9 @@ class AIJudgment(BaseModel):
     business_identity: str
     summary: str
     recommendation: str
+    investigation_log: list[str] = []
+    contradictions_found: list[str] = []
+    identity_verdict: str = "unverifiable"
 
 
 class AnalyzeResponse(BaseModel):
@@ -94,12 +97,14 @@ class AnalyzeResponse(BaseModel):
     # AI judgment
     ai_judgment: AIJudgment | None = None
     external_reviews: str | None = None
+    visual_analysis: dict[str, Any] | None = None
 
     # metadata
     agent: Literal["python"] = "python"
     analyzed_at: str
     timings_ms: dict[str, int]
     warnings: list[str] = []
+    signals: dict[str, Any] = {}
 
 
 class ScreenshotRequest(BaseModel):
@@ -113,7 +118,7 @@ class ScreenshotsRequest(BaseModel):
     # Capture timeline offsets after navigation (milliseconds)
     delays_ms: list[int] = Field(default_factory=lambda: [1000, 3000, 5000])
     full_page: bool = Field(False)
-    timeout_ms: int = Field(20000, ge=1000, le=60000)
+    timeout_ms: int = Field(30000, ge=1000, le=120000)
 
 
 class ScreenshotTimelineItem(BaseModel):
